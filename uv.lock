@@ -16,6 +16,7 @@ name = "ctrl-alt-del"
 version = "0.1.0"
 source = { editable = "." }
 dependencies = [
+    { name = "llama-cpp-python" },
     { name = "pygame-ce" },
     { name = "pyyaml" },
 ]
@@ -24,18 +25,15 @@ dependencies = [
 dev = [
     { name = "pytest" },
 ]
-llm = [
-    { name = "llama-cpp-python" },
-]
 
 [package.metadata]
 requires-dist = [
-    { name = "llama-cpp-python", marker = "extra == 'llm'", specifier = ">=0.3.0" },
+    { name = "llama-cpp-python", specifier = ">=0.3.0" },
     { name = "pygame-ce", specifier = ">=2.5.0" },
     { name = "pytest", marker = "extra == 'dev'", specifier = ">=8.0.0" },
     { name = "pyyaml", specifier = ">=6.0.0" },
 ]
-provides-extras = ["llm", "dev"]
+provides-extras = ["dev"]
 
 [[package]]
 name = "diskcache"

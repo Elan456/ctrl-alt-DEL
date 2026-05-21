@@ -1,0 +1,59 @@
+crew:
+  tec:
+    role: systems_technician
+  eng:
+    role: engineering_officer
+  ops:
+    role: operations_officer
+  sec:
+    role: security_officer
+
+commands:
+  status:
+    target_types: [system]
+  loc:
+    target_types: [crew]
+  logs:
+    target_types: [system, crew, room, door, memory, broadcast]
+    allow_empty_target: true
+  lock:
+    target_types: [door]
+  unlock:
+    target_types: [door]
+  mem:
+    subcommands:
+      add:
+        min_words: 1
+  msg:
+    target_types: [crew]
+    min_words: 1
+  broadcast:
+    min_words: 1
+
+task_jobs:
+  inspect:
+    target_types: [system, door, room]
+  check:
+    target_types: [system, door, room]
+  monitor:
+    target_types: [system, door, room]
+  guard:
+    target_types: [door, room]
+  escort:
+    target_types: [crew]
+  detain:
+    target_types: [crew]
+  repair:
+    target_types: [system]
+    allowed_reported_states: [degraded, failed, under repair]
+  reset:
+    target_types: [system]
+    allowed_reported_states: [degraded, failed, under repair]
+  verify:
+    target_types: [system, door, room]
+
+role_task_jobs:
+  systems_technician: [inspect, check, monitor, repair, reset, verify]
+  engineering_officer: [inspect, check, monitor, repair, reset, verify]
+  operations_officer: [inspect, check, monitor, verify]
+  security_officer: [inspect, check, monitor, guard, escort, detain, verify]

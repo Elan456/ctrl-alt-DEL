@@ -3,7 +3,7 @@ from __future__ import annotations
 import pygame
 
 from ctrl_alt_del.crew import CrewMate, CrewRole
-from ctrl_alt_del.del_ai import DEL
+from ctrl_alt_del.del_ai import DEL, TranscriptSink
 from ctrl_alt_del.ship import Ship
 from ctrl_alt_del.systems import SystemKind, SystemState
 
@@ -13,7 +13,7 @@ PLAYER_COLLISION_INSET = 3
 
 
 class Game:
-    def __init__(self) -> None:
+    def __init__(self, del_transcript: TranscriptSink | None = None) -> None:
         pygame.init()
         pygame.display.set_caption("ctrl-alt-DEL Prototype")
         self.screen = pygame.display.set_mode(SCREEN_SIZE)
@@ -34,24 +34,27 @@ class Game:
         self._crew("ops", CrewRole.OPERATIONS_OFFICER, "bridge", (1280, 290), (180, 230, 120))
         self._crew("sec", CrewRole.SECURITY_OFFICER, "security", (340, 340), (235, 110, 110))
 
-        self.del_ai = DEL(self.ship)
-        self.del_output = self.del_ai.execute("/status oxygen")
+        self.del_ai = DEL(self.ship, transcript=del_transcript)
+        self.del_ai.start()
 
     def run(self) -> int:
         running = True
-        while running:
-            dt = self.clock.tick(60) / 1000.0
-            for event in pygame.event.get():
-                if event.type == pygame.QUIT:
-                    running = False
-                elif event.type == pygame.KEYDOWN:
-                    self._handle_key(event.key)
+        try:
+            while running:
+                dt = self.clock.tick(60) / 1000.0
+                for event in pygame.event.get():
+                    if event.type == pygame.QUIT:
+                        running = False
+                    elif event.type == pygame.KEYDOWN:
+                        self._handle_key(event.key)
 
-            self._move_player(dt)
-            self.ship.tick(dt)
-            self._draw()
-
-        pygame.quit()
+                with self.del_ai.lock:
+                    self._move_player(dt)
+                    self.ship.tick(dt)
+                self._draw()
+        finally:
+            self.del_ai.stop()
+            pygame.quit()
         return 0
 
     def _crew(
@@ -69,23 +72,17 @@ class Game:
         return crew_member
 
     def _handle_key(self, key: int) -> None:
-        if key == pygame.K_1:
-            self.ship.damage_system(SystemKind.POWER, actor="player")
-            self.del_output = self.del_ai.execute("/status power")
-        elif key == pygame.K_2:
-            self.ship.damage_system(SystemKind.OXYGEN, actor="player")
-            self.del_output = self.del_ai.execute("/status oxygen")
-        elif key == pygame.K_3:
-            self.ship.spoof_system(SystemKind.OXYGEN, SystemState.NORMAL, actor="player")
-            self.del_output = self.del_ai.execute("/status oxygen")
-        elif key == pygame.K_4:
-            self.del_output = self.del_ai.execute("/task eng repair oxygen")
-        elif key == pygame.K_5:
-            self.del_output = self.del_ai.think()
-        elif key == pygame.K_6:
-            self.del_output = self.del_ai.execute("/lock door_life_support_aft_corridor")
-        elif key == pygame.K_7:
-            self.del_output = self.del_ai.execute("/unlock door_life_support_aft_corridor")
+        with self.del_ai.lock:
+            if key == pygame.K_1:
+                self.ship.damage_system(SystemKind.POWER, actor="player")
+            elif key == pygame.K_2:
+                self.ship.damage_system(SystemKind.OXYGEN, actor="player")
+            elif key == pygame.K_3:
+                self.ship.spoof_system(SystemKind.OXYGEN, SystemState.NORMAL, actor="player")
+            elif key == pygame.K_6:
+                self.ship.lock_door("door_life_support_aft_corridor", actor="player")
+            elif key == pygame.K_7:
+                self.ship.unlock_door("door_life_support_aft_corridor", actor="player")
 
     def _move_player(self, dt: float) -> None:
         keys = pygame.key.get_pressed()
@@ -99,7 +96,8 @@ class Game:
             movement = movement.normalize() * PLAYER_SPEED * dt
         self._move_player_axis(round(movement.x), 0)
         self._move_player_axis(0, round(movement.y))
-        self.ship.set_crew_location_from_point("player", self.player.rect.center)
+        with self.del_ai.lock:
+            self.ship.set_crew_location_from_point("player", self.player.rect.center)
 
     def _move_player_axis(self, dx: int, dy: int) -> None:
         if dx == 0 and dy == 0:
@@ -126,10 +124,11 @@ class Game:
 
     def _draw(self) -> None:
         self.screen.fill((10, 14, 20))
-        camera = self._camera_offset()
-        self._draw_ship(camera)
-        self._draw_crew(camera)
-        self._draw_hud()
+        with self.del_ai.lock:
+            camera = self._camera_offset()
+            self._draw_ship(camera)
+            self._draw_crew(camera)
+            self._draw_hud()
         pygame.display.flip()
 
     def _draw_ship(self, camera: pygame.Vector2) -> None:
@@ -163,10 +162,10 @@ class Game:
         y = 12
         lines = [
             f"FPS: {self.clock.get_fps():04.1f}",
-            "WASD/arrows move. 1 damage power. 2 damage oxygen. 3 spoof oxygen. 4 task engineer. 5 DEL think. 6/7 lock/unlock LS door.",
+            "WASD/arrows move. 1 damage power. 2 damage oxygen. 3 spoof oxygen. 6/7 player lock/unlock LS door.",
             f"Arrival: {self.ship.arrival_seconds_remaining:05.1f}s",
             f"Location: {self.player.room}",
-            f"DEL: {self.del_output}",
+            f"DEL: {self.del_ai.last_output}",
         ]
         for line in lines:
             surface = self.font.render(line, True, (230, 235, 240))
