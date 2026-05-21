@@ -9,7 +9,6 @@ class SystemState(StrEnum):
     DEGRADED = "degraded"
     FAILED = "failed"
     LOCKED = "locked"
-    SPOOFED = "spoofed"
     UNDER_REPAIR = "under repair"
 
 
@@ -29,30 +28,33 @@ class ShipSystem:
     physical_state: SystemState = SystemState.NORMAL
     reported_state: SystemState = SystemState.NORMAL
     room: str = ""
+    report_overridden: bool = False
 
     @property
-    def is_spoofed(self) -> bool:
+    def has_report_mismatch(self) -> bool:
         return self.physical_state != self.reported_state
 
-    def report(self) -> dict[str, str | bool]:
+    def report(self) -> dict[str, str]:
         return {
             "system": self.kind.value,
             "reported_state": self.reported_state.value,
             "room": self.room,
-            "spoofed": self.is_spoofed,
         }
 
     def damage(self, state: SystemState = SystemState.DEGRADED) -> None:
         self.physical_state = state
-        if self.reported_state != SystemState.SPOOFED:
+        if not self.report_overridden:
             self.reported_state = state
 
     def repair(self) -> None:
         self.physical_state = SystemState.NORMAL
         self.reported_state = SystemState.NORMAL
+        self.report_overridden = False
 
     def spoof_report(self, state: SystemState = SystemState.NORMAL) -> None:
         self.reported_state = state
+        self.report_overridden = True
 
     def clear_spoof(self) -> None:
         self.reported_state = self.physical_state
+        self.report_overridden = False

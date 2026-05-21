@@ -1,0 +1,76 @@
+rooms:
+  bridge:
+    name: Bridge
+    rect: [1120, 180, 320, 220]
+  engineering:
+    name: Engineering
+    rect: [160, 860, 360, 260]
+  life_support:
+    name: Life Support
+    rect: [1260, 820, 360, 260]
+  security:
+    name: Security
+    rect: [180, 220, 320, 240]
+  storage:
+    name: Storage
+    rect: [760, 980, 280, 180]
+  main_hallway:
+    name: Main Hallway
+    rect: [820, 300, 240, 170]
+  maintenance_corridor:
+    name: Maintenance Corridor
+    rect: [760, 760, 340, 150]
+
+corridors:
+  security_to_main_hallway:
+    connects: [security, main_hallway]
+    rect: [470, 320, 380, 80]
+    doors:
+      - id: door_security_main_hall
+        at: security
+        rect: [484, 308, 48, 104]
+  bridge_to_main_hallway:
+    connects: [bridge, main_hallway]
+    rect: [1030, 320, 120, 80]
+    doors:
+      - id: door_bridge_main_hall
+        at: bridge
+        rect: [1096, 308, 48, 104]
+  main_hallway_to_maintenance:
+    connects: [main_hallway, maintenance_corridor]
+    rect: [910, 440, 80, 350]
+    doors: []
+  engineering_to_storage:
+    connects: [engineering, storage]
+    rect: [440, 1000, 360, 80]
+    doors:
+      - id: door_engineering_maintenance
+        at: engineering
+        rect: [496, 988, 48, 104]
+      - id: door_storage_maintenance
+        at: storage
+        rect: [736, 988, 48, 104]
+  storage_to_life_support:
+    connects: [storage, life_support]
+    rect: [1000, 1000, 300, 80]
+    doors:
+      - id: door_storage_life_support
+        at: storage
+        rect: [1016, 988, 48, 104]
+      - id: door_life_support_storage
+        at: life_support
+        rect: [1236, 988, 48, 104]
+  engineering_to_maintenance:
+    connects: [engineering, maintenance_corridor]
+    rect: [440, 800, 360, 80]
+    doors:
+      - id: door_engineering_aft_corridor
+        at: engineering
+        rect: [496, 788, 48, 104]
+  life_support_to_maintenance:
+    connects: [life_support, maintenance_corridor]
+    rect: [1060, 800, 240, 80]
+    doors:
+      - id: door_life_support_aft_corridor
+        at: life_support
+        rect: [1236, 788, 48, 104]

@@ -86,10 +86,7 @@ class DEL:
 
     def _status(self, args: list[str]) -> str:
         report = self.ship.status(args[0])
-        return (
-            f"STATUS {report['system']}={report['reported_state']} "
-            f"room={report['room']} spoofed={report['spoofed']}"
-        )
+        return f"STATUS {report['system']}={report['reported_state']} room={report['room']}"
 
     def _loc(self, args: list[str]) -> str:
         crew_id = args[0]

@@ -25,6 +25,10 @@ The player's fantasy is not direct combat with an AI. The fantasy is:
 - sabotage interconnected systems from inside the ship
 - act normal while failures cascade
 
+# Environment
+
+uv can be found at `~/.local/bin/uv`
+
 # Prototype Scope
 
 Keep the first prototype small.

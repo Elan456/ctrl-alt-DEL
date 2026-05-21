@@ -39,7 +39,6 @@ Use simple states:
 - degraded
 - failed
 - locked
-- spoofed
 - under repair
 
 # Prototype Rooms

@@ -7,7 +7,7 @@ import pygame
 
 
 class CrewRole(StrEnum):
-    PLAYER_TECHNICIAN = "systems technician"
+    SYSTEMS_TECHNICIAN = "systems technician"
     ENGINEERING_OFFICER = "engineering officer"
     OPERATIONS_OFFICER = "operations officer"
     SECURITY_OFFICER = "security officer"
