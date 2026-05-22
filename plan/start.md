@@ -1,6 +1,16 @@
 
+# HISTORICAL SCRATCHPAD
 
-ideas
+This file records early raw ideas. It is not current implementation guidance.
+
+Use these instead:
+
+- `plan/northstar.md` for stable product direction.
+- `plan/implementation.md` for the current code map.
+- `plan/DEL.md` for the current structured action interface.
+- `plan/systems.md` and `plan/roles.md` for prototype scope.
+
+# Early Ideas
 - the space ship is controlled by a locally-running LLM on the player's PC
 - The LLM has a linux-like terminal it can interact with to issue commands 
 - The LLM's job is to get the ship to it's destination at all costs

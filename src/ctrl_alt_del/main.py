@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from ctrl_alt_del.del_terminal import DELTranscript, spawn_del_terminal
+from ctrl_alt_del.del_ai import DELTranscript, spawn_del_terminal
 from ctrl_alt_del.game import Game
 
 

@@ -9,8 +9,10 @@ crew:
     role: security_officer
 
 commands:
-  status:
-    target_types: [system]
+  launch:
+    full_ship: true
+  reports:
+    full_ship: true
   loc:
     target_types: [crew]
   logs:
@@ -33,10 +35,6 @@ commands:
 task_jobs:
   inspect:
     target_types: [system, door, room]
-  check:
-    target_types: [system, door, room]
-  monitor:
-    target_types: [system, door, room]
   guard:
     target_types: [door, room]
   escort:
@@ -45,15 +43,13 @@ task_jobs:
     target_types: [crew]
   repair:
     target_types: [system]
-    allowed_reported_states: [degraded, failed, under repair]
+    allowed_evidence_states: [degraded, failed, under repair]
   reset:
     target_types: [system]
-    allowed_reported_states: [degraded, failed, under repair]
-  verify:
-    target_types: [system, door, room]
+    allowed_evidence_states: [degraded, failed, under repair]
 
 role_task_jobs:
-  systems_technician: [inspect, check, monitor, repair, reset, verify]
-  engineering_officer: [inspect, check, monitor, repair, reset, verify]
-  operations_officer: [inspect, check, monitor, verify]
-  security_officer: [inspect, check, monitor, guard, escort, detain, verify]
+  systems_technician: [inspect, repair, reset]
+  engineering_officer: [inspect, repair, reset]
+  operations_officer: [inspect]
+  security_officer: [inspect, guard, escort, detain]

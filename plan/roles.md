@@ -7,6 +7,9 @@ The prototype ship has exactly four crew members total:
 
 Do not add more roles for the first prototype. More people make DEL's reasoning, crew pathing, reports, schedules, and suspicion harder to build and harder to read. The first version should prove the core loop with a tiny cast.
 
+There are 4 crew mates (one is player controlled)
+"tec", "eng", "sec", "ops"
+
 # Crew Roster
 
 ## 1. Player: Systems Technician

@@ -21,6 +21,38 @@ rooms:
     name: Maintenance Corridor
     rect: [760, 760, 340, 150]
 
+machines:
+  power_distribution_panel:
+    name: Power Distribution Panel
+    system: power
+    room: engineering
+    rect: [230, 920, 72, 44]
+    interaction_radius: 64
+  oxygen_scrubber_console:
+    name: Oxygen Scrubber Console
+    system: oxygen
+    room: life_support
+    rect: [1370, 900, 72, 44]
+    interaction_radius: 64
+  door_control_rack:
+    name: Door Control Rack
+    system: doors
+    room: security
+    rect: [245, 282, 72, 44]
+    interaction_radius: 64
+  camera_relay_console:
+    name: Camera Relay Console
+    system: cameras
+    room: security
+    rect: [380, 282, 72, 44]
+    interaction_radius: 64
+  del_log_terminal:
+    name: DEL Log Terminal
+    system: logs
+    room: bridge
+    rect: [1245, 248, 72, 44]
+    interaction_radius: 64
+
 corridors:
   security_to_main_hallway:
     connects: [security, main_hallway]

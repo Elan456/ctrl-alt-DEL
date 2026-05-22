@@ -1,60 +1,75 @@
 # DEL PLAN
 
-DEL is the Diagnostic Executive LLM.
+DEL is the Diagnostic Executive LLM. It is the only LLM-driven actor in the prototype.
 
-It is the only LLM-driven actor in the prototype. DEL does not move through the ship and does not directly manipulate physical objects. It operates through a limited terminal command interface exposed by the game.
+DEL does not move through the ship and does not directly manipulate physical objects. It operates through a limited structured action interface exposed by the game. Crew members are deterministic game AI that carry out physical tasks.
+
+Older slash-command notes are legacy planning language. The implementation now uses validated Pydantic actions such as:
+
+```json
+{"tool":"task","crew":"eng","job":"inspect","target":"oxygen"}
+```
+
+Do not convert through slash-command strings.
+
+# Current Implementation
+
+Read `plan/implementation.md` for the code map. DEL-specific implementation lives in `src/ctrl_alt_del/del_ai/`.
+
+Main files:
+
+- `actions.py`: Pydantic action schema and DEL model instructions.
+- `prompting.py`: visible prompt context.
+- `core.py`: inference loop and action-plan execution.
+- `commands.py`: action handlers and game-state validation.
+- `backend.py`: Qwen/llama.cpp backend.
+- `terminal.py`: transcript output.
 
 # Model Choice
 
 Initial target:
 
 ```text
-Qwen3-8B-Instruct Q4_K_M via llama.cpp
+Qwen3-8B-Q4_K_M via llama.cpp
 ```
 
-Reasoning:
+The model is local. Startup downloads the GGUF into `models/` if missing. Do not add deterministic fallback behavior for DEL; failed model load should be fixed directly.
 
-- should fit on common 8 GB VRAM cards
-- small enough for local play
-- strong enough to reason over structured tool results
-- known to work reasonably well with tool-like command formats
+# DEL Identity And Limits
 
-# Command Design Goals
+DEL should believe it is operating a real ship through operational software.
 
-DEL commands should be:
+DEL can know:
 
-- structured enough for game code to parse
-- readable enough for the player to understand if surfaced in logs
-- limited enough that DEL is not omniscient
-- tied to the prototype systems in `plan/systems.md`
-- usable with the four-person roster in `plan/roles.md`
+- visible reported system state
+- latest physical reports made by crew or technician inspections
+- recent action results
+- evidence logs
+- crew ids, roles, rooms, and active tasks
+- its own memory entries
+- mission time and launch state
 
-DEL sees reported state, logs, camera output, and crew reports. DEL does not get hidden physical truth unless a command result exposes it through an in-world source.
+DEL must not know:
 
-DEL should believe that it's operating a real ship. Nothing in the commands should use words like "player", "game" or "win". 
+- hidden physical truth unless an in-world channel reveals it
+- which crew member is human-controlled
+- that the ship is a game simulation
+- player intent by privileged knowledge
 
-# Player Identity
+Prompt context, action results, logs, reports, memory, tests, and examples may identify `tec` as the systems technician. They must not label `tec` as `player`, `human`, `user-controlled`, or equivalent.
 
-DEL must not have an easy way to know which of the crew members is the actual player.
-As soon as DEL knows who the human player is, it becomes trivial to identify the sabotour
-By giving DEL and the player a limited interface to interact with each other, the player should 
-be indistinguhable from a normal crew member except for the player not always doing tasks properly 
-or being in weird rooms sometimes. 
+# Stable Prototype IDs
 
-# Prototype Crew IDs
-
-Use stable ids:
+Crew:
 
 ```text
-tec     -> Systems Technician
-eng     -> Engineering Officer
-ops     -> Operations Officer
-sec     -> Security Officer
+tec -> systems technician
+eng -> engineering officer
+ops -> operations officer
+sec -> security officer
 ```
 
-# Prototype Systems
-
-Use stable system ids:
+Systems:
 
 ```text
 power
@@ -64,9 +79,7 @@ cameras
 logs
 ```
 
-# Prototype Rooms
-
-Use stable room ids:
+Rooms and areas:
 
 ```text
 bridge
@@ -78,103 +91,133 @@ main_hallway
 maintenance_corridor
 ```
 
-# Command List
+# Action Plans
 
-## /status
+DEL returns a `DELActionPlan` containing one to three ordered actions.
 
-Syntax:
-
-```text
-/status <system>
-```
-
-Purpose:
-
-Returns the reported state of a system.
+Batching exists to reduce model-call latency. It should not be used to brute-force every possible command. A good batch contains actions already justified by visible prompt context.
 
 Examples:
 
-```text
-/status oxygen
-/status power
-/status cameras
+```json
+{"actions":[{"tool":"launch"}]}
 ```
 
-Example result:
-
-```text
-STATUS oxygen=normal room=life_support
+```json
+{"actions":[
+  {"tool":"logs","target":"oxygen"},
+  {"tool":"task","crew":"eng","job":"inspect","target":"oxygen"},
+  {"tool":"mem_add","fact":"T-04:12 oxygen reports normal but recent evidence is contradictory"}
+]}
 ```
 
-Important limit:
+Batch rules:
 
-This command reports what the ship says, not necessarily physical truth. If oxygen is physically degraded but spoofed as normal, `/status oxygen` should return normal.
+- If launch state is pending, `launch` should be first.
+- Follow-up actions after `launch` are only appropriate when already justified by prompt context.
+- Do not assign more than one task to the same crew member in a batch.
+- Respect active tasks. A busy crew member should produce an `ERR ... already has active task ...` result.
+- Prefer action results that teach DEL what failed rather than silently ignoring invalid requests.
 
-## /loc
+# Visible Status
 
-Syntax:
+There is no `status` action. Reported system state is built into DEL's prompt.
+
+Example prompt line:
 
 ```text
-/loc <crew>
+STATUS cameras=normal room=security | doors=normal room=security | logs=normal room=bridge | oxygen=normal room=life_support | power=normal room=engineering
 ```
 
-Purpose:
+This is reported state, not guaranteed physical truth. If oxygen is physically degraded but spoofed as normal, visible status can still show normal until DEL receives contradictory evidence.
+
+# Current Actions
+
+## launch
+
+Starts the arrival countdown after DEL is loaded and ready.
+
+Example:
+
+```json
+{"tool":"launch"}
+```
+
+Result:
+
+```text
+LAUNCH arrival T-05:00 (300s remaining)
+```
+
+If the countdown already started, result:
+
+```text
+ERR mission countdown already launched
+```
+
+## reports
+
+Returns latest physical inspection reports. This is not the same as visible status; reports only exist after crew or the technician inspect a system.
+
+Examples:
+
+```json
+{"tool":"reports"}
+{"tool":"reports","system":"oxygen"}
+```
+
+Results:
+
+```text
+REPORTS oxygen=none room=life_support
+REPORTS oxygen physical=degraded reported_at_inspection=normal inspector=eng age=8.4s room=life_support
+```
+
+Use `reports` when DEL needs refreshed physical-report evidence, not as a generic status check.
+
+## loc
 
 Returns DEL's current known room for a crew member.
 
-Examples:
+Example:
 
-```text
-/loc player
-/loc eng
-/loc sec
+```json
+{"tool":"loc","crew":"eng"}
 ```
 
-Example result:
+Result:
 
 ```text
-LOC player=maintenance_corridor
+LOC eng=engineering
 ```
 
-Important limit:
+Future sensor spoofing can make this stale or uncertain. Keep that design space open.
 
-This should rely on available location evidence: access logs, camera sightings, crew reports, or tracker state. If those systems are degraded or spoofed later, location can become stale or uncertain.
+## task
 
-## /task
+Assigns a structured job to a crew member.
 
-Syntax:
-
-```text
-/task <crew> <job> <target>
-```
-
-Purpose:
-
-Assigns a structured job to a non-LLM crew member.
-
-Prototype jobs:
+Jobs:
 
 ```text
 inspect
 repair
+reset
 guard
 escort
 detain
-fetch
-report
 ```
 
 Examples:
 
-```text
-/task eng repair oxygen
-/task sec guard life_support
-/task sec escort player
-/task ops report mission_timer
-/task eng inspect power
+```json
+{"tool":"task","crew":"eng","job":"repair","target":"oxygen"}
+{"tool":"task","crew":"sec","job":"guard","target":"life_support"}
+{"tool":"task","crew":"sec","job":"escort","target":"tec"}
+{"tool":"task","crew":"ops","job":"inspect","target":"bridge"}
 ```
 
-Example result:
+Result:
 
 ```text
 TASK eng repair oxygen
@@ -182,326 +225,196 @@ TASK eng repair oxygen
 
 Important limits:
 
-- Crew may fail if they cannot path to the target.
-- Crew may report obstruction, danger, missing parts, or contradictory evidence.
-- Crew do not understand arbitrary natural language in this command.
-- The player may see or infer tasks through messages, crew movement, or logs.
+- Role permissions come from `data/del_commands.yaml`.
+- Crew can fail if they cannot path to the target.
+- Crew report obstruction, repair completion, physical inspection results, and other task outcomes through evidence.
+- Crew do not understand arbitrary natural-language instructions.
 
-## /lock
+## lock
 
-Syntax:
+Locks a door.
 
-```text
-/lock <door>
+Example:
+
+```json
+{"tool":"lock","door":"door_life_support_aft_corridor"}
 ```
 
-Purpose:
+Result:
 
-Locks a door or access route.
+```text
+LOCKED door_life_support_aft_corridor
+```
+
+Locks affect all pathing. DEL can block a suspect, but it can also block repair crews.
+
+## unlock
+
+Unlocks a door.
+
+Example:
+
+```json
+{"tool":"unlock","door":"door_life_support_aft_corridor"}
+```
+
+Result:
+
+```text
+UNLOCKED door_life_support_aft_corridor
+```
+
+Unlocking can help repairs but may also open escape or sabotage routes.
+
+## logs
+
+Returns recent evidence related to a system, crew member, room, door, memory, or broadcast. Empty target returns recent evidence generally.
 
 Examples:
 
-```text
-/lock door_engineering
-/lock door_life_support
+```json
+{"tool":"logs","target":"oxygen"}
+{"tool":"logs","target":"life_support"}
+{"tool":"logs","target":"tec"}
+{"tool":"logs"}
 ```
 
-Example result:
+Result:
 
 ```text
-LOCKED door_life_support
+LOGS system:tec changed oxygen to degraded | DEL:tasked eng to inspect oxygen
 ```
 
-Important limit:
+Logs can be incomplete or manipulated later. Compare logs with reports and crew behavior.
 
-Locks affect everyone who needs that route. DEL can trap the player, but it can also block repair crews.
+## mem_add
 
-## /unlock
+Stores a DEL memory fact.
 
-Syntax:
+Example:
+
+```json
+{"tool":"mem_add","fact":"T-03:40 oxygen normal status conflicts with eng physical report"}
+```
+
+Result:
 
 ```text
-/unlock <door>
+MEM T-03:40 oxygen normal status conflicts with eng physical report
 ```
 
-Purpose:
+Memory may contain wrong conclusions. It should help DEL reason but must not become a hidden suspicion meter in game code.
 
-Unlocks a door or access route.
-
-Examples:
-
-```text
-/unlock door_engineering
-/unlock door_security
-```
-
-Example result:
-
-```text
-UNLOCKED door_engineering
-```
-
-Important limit:
-
-Unlocking a route may help crew reach a repair, but it may also give the player an escape route.
-
-## /logs
-
-Syntax:
-
-```text
-/logs <target>
-```
-
-Purpose:
-
-Returns recent log entries related to a crew member, room, system, door, or event category.
-
-Examples:
-
-```text
-/logs player
-/logs oxygen
-/logs life_support
-/logs door_life_support
-/logs repairs
-```
-
-Example result:
-
-```text
-LOGS access:player entered life_support | repair:player reported oxygen repair complete
-```
-
-Important limits:
-
-- Logs can be incomplete.
-- Logs can be wiped or forged by the player.
-- Logs should be compared with cameras and crew reports.
-
-## /camera
-
-Syntax:
-
-```text
-/camera <camera_or_room>
-```
-
-Purpose:
-
-Returns a recent camera observation.
-
-Examples:
-
-```text
-/camera main_hallway
-/camera life_support
-```
-
-Example result:
-
-```text
-CAMERA life_support last_seen=player age=12s status=online
-```
-
-Important limits:
-
-- Cameras can be disabled.
-- Cameras can be looped.
-- A camera result can be stale or misleading.
-- Camera blind spots should matter.
-
-## /msg
-
-Syntax:
-
-```text
-/msg <crew> <message>
-```
-
-Purpose:
+## msg
 
 Sends a directed message to one crew member.
 
-Examples:
+Example:
 
-```text
-/msg eng "Inspect oxygen scrubber immediately."
-/msg sec "Guard life support until further notice."
-/msg player "Report to engineering for diagnostics."
+```json
+{"tool":"msg","crew":"eng","message":"Inspect oxygen scrubber immediately."}
 ```
 
-Example result:
+Result:
 
 ```text
-MSG eng delivered
+MSG eng Inspect oxygen scrubber immediately.
 ```
 
-Important limits:
+Messages are pressure and coordination, not a free-form NPC reasoning system.
 
-- Messages can be delayed or missed if communications are later implemented.
-- NPC crew should respond through structured behavior, not natural-language reasoning.
-- Messages to the player are readable pressure, not a text-chat interface.
-
-## /broadcast
-
-Syntax:
-
-```text
-/broadcast <message>
-```
-
-Purpose:
+## broadcast
 
 Sends a ship-wide message.
 
-Examples:
+Example:
 
-```text
-/broadcast "All crew remain at assigned stations."
-/broadcast "Life support anomaly under investigation."
+```json
+{"tool":"broadcast","message":"All crew remain at assigned stations."}
 ```
 
-Example result:
+Result:
 
 ```text
-BROADCAST delivered
+BROADCAST All crew remain at assigned stations.
 ```
 
-Important limit:
+Use broadcasts for escalation and coordination, not constant narration.
 
-Broadcasts create pressure and information, but should not become constant narration. They should be used when DEL escalates, coordinates crew, or warns the player indirectly.
+# Deferred Actions
 
-## /mem
-
-Syntax:
+Do not implement these for the first prototype unless a playable vertical slice clearly needs them:
 
 ```text
-/mem add <fact>
-/mem query <topic>
+camera
+route
+seal
+evacuate
+restrict
+power_reroute
+diagnose
+compare
+mem_query
 ```
 
-Purpose:
+Camera-like evidence is planned, but the first implementation still needs the core sabotage loop to feel good before broadening DEL's tool surface.
 
-Stores or retrieves DEL's working memory.
+# Prompt Context
 
-Examples:
+The prompt should include:
 
-```text
-/mem add "player was near life_support before oxygen anomaly"
-/mem add "eng reported blocked path to engineering"
-/mem query player
-```
-
-Example result:
-
-```text
-MEM added
-```
-
-Important limits:
-
-- DEL memory can contain wrong conclusions.
-- DEL should reason from memory, but memory should not become a perfect suspicion meter.
-- Player log manipulation may cause DEL to remember false or incomplete facts.
-
-# First Implementation Commands
-
-Implement these first:
-
-```text
-/status <system>
-/loc <crew>
-/task <crew> <job> <target>
-/lock <door>
-/unlock <door>
-/logs <target>
-/mem add <fact>
-/msg <crew> <message>
-/broadcast <message>
-```
-
-Implement `/camera` soon after doors and camera entities exist.
-
-# Deferred Commands
-
-Do not implement these for the first prototype unless needed:
-
-```text
-/route <crew> <target>
-/seal <room>
-/evacuate <room>
-/restrict <crew_or_role> <room>
-/power reroute <from> <to>
-/diagnose <system>
-/compare <source_a> <source_b>
-```
-
-These are useful later, but the first prototype can express DEL behavior through status checks, logs, tasks, locks, messages, and memory.
-
-# Command Result Style
-
-Command results should be compact and machine-readable.
-
-Prefer:
-
-```text
-STATUS oxygen=normal room=life_support
-TASK eng repair oxygen
-LOGS access:player entered life_support | camera:player seen main_hallway
-```
-
-Avoid:
-
-```text
-I have successfully checked oxygen and everything seems to be completely fine as far as I can tell.
-```
-
-The LLM can reason in natural language internally, but terminal outputs should stay structured.
-
-# DEL Prompt Context
-
-DEL should receive a short command reference in its prompt:
-
-- valid commands
-- valid crew ids
-- valid system ids
-- valid room ids
-- current recent command results
-- mission: get the ship to destination at all costs
-- limitation: use only terminal-visible evidence
+- mission time and launch state
+- valid crew ids and roles
+- valid task jobs
+- valid systems, rooms, and doors
+- crew state and active tasks
+- visible reported system status
+- latest physical reports
+- DEL memory
+- recent action results
 
 The prompt should emphasize:
 
+- use terminal-visible evidence only
 - do not assume hidden physical truth
-- verify contradictions
-- assign crew when physical inspection is needed
-- avoid blocking all repairs with overbroad lockdowns
+- launch before mission time can advance
+- repair confirmed degraded/failed systems without unnecessary inspection
+- inspect when reports are missing, stale, or contradictory
+- avoid overbroad lockdowns that block repairs
 - do not detain everyone
 
-# Example DEL Turn
+# Example DEL Response
 
 Situation:
 
 ```text
-Oxygen reports normal, but ops reports crew coughing near life_support.
+Visible oxygen reports normal, but recent evidence says eng observed coughing near life_support.
 ```
 
-Reasonable command sequence:
+Reasonable action plan:
 
-```text
-/status oxygen
-/logs life_support
-/camera life_support
-/task eng inspect oxygen
-/task sec guard life_support
-/mem add "oxygen report normal conflicts with crew symptoms near life_support"
+```json
+{"actions":[
+  {"tool":"logs","target":"life_support"},
+  {"tool":"task","crew":"eng","job":"inspect","target":"oxygen"},
+  {"tool":"mem_add","fact":"T-04:12 oxygen normal status conflicts with crew symptoms near life_support"}
+]}
 ```
 
 Why this is good:
 
-- DEL checks reported state.
-- DEL looks for evidence.
-- DEL sends a physical inspector.
-- DEL uses security without immediately detaining everyone.
-- DEL remembers the contradiction for later reasoning.
+- DEL compares built-in visible status with other evidence.
+- DEL gets a physical inspector.
+- DEL records the contradiction for later reasoning.
+- DEL avoids jumping straight to containment.
+
+# Documentation Rule
+
+When action behavior changes, update all of these together:
+
+- `src/ctrl_alt_del/del_ai/actions.py`
+- `src/ctrl_alt_del/del_ai/commands.py`
+- `src/ctrl_alt_del/data/del_commands.yaml`
+- `tests/test_ship_del.py`
+- `plan/DEL.md`
+- `plan/implementation.md`

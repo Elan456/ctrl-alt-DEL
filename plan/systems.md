@@ -85,23 +85,17 @@ The player never types. Use direct actions:
 
 Normal technician work and sabotage should look similar from the outside. DEL should need evidence to tell the difference.
 
-# DEL Commands
+# DEL Actions
 
-Start with a small terminal API:
+DEL now uses a small structured action API validated with Pydantic models. Older slash-command examples are legacy planning shorthand only; the implementation should execute structured actions directly, not convert through command strings.
 
-```text
-/status <system>
-/loc <crew>
-/task <crew> <job> <target>
-/lock <door>
-/unlock <door>
-/logs <target>
-/mem add <fact>
-/msg <crew> <message>
-/broadcast <message>
-```
+Initial action tools: `launch`, `loc`, `task`, `lock`, `unlock`, `logs`, `mem_add`, `msg`, `broadcast`.
 
-DEL gets structured reports from these commands. It does not get hidden truth.
+DEL may return a small ordered batch of up to three actions per inference pass so it can launch, inspect evidence, and issue urgent orders without waiting for another model call.
+
+The arrival countdown starts only after DEL successfully issues `launch`, so model load time does not consume mission time.
+
+DEL gets structured reports from these actions. It does not get hidden truth.
 
 # Evidence
 
