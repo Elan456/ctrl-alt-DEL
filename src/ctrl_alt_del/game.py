@@ -169,6 +169,9 @@ class Game:
                 self._toast_message = ""
 
     def _move_player(self, dt: float) -> None:
+        if not self.player.alive:
+            return
+
         keys = pygame.key.get_pressed()
         dx = int(keys[pygame.K_d] or keys[pygame.K_RIGHT]) - int(keys[pygame.K_a] or keys[pygame.K_LEFT])
         dy = int(keys[pygame.K_s] or keys[pygame.K_DOWN]) - int(keys[pygame.K_w] or keys[pygame.K_UP])
@@ -263,6 +266,10 @@ class Game:
     def _draw_crew(self, camera: pygame.Vector2) -> None:
         for sprite in self.sprites:
             screen_rect = sprite.rect.move(-round(camera.x), -round(camera.y))
+            if isinstance(sprite, CrewMate) and not sprite.alive:
+                sprite.image.set_alpha(90)
+            else:
+                sprite.image.set_alpha(255)
             self.screen.blit(sprite.image, screen_rect)
             if isinstance(sprite, CrewMate):
                 self._draw_crew_task_label(sprite, screen_rect)
@@ -423,8 +430,12 @@ class Game:
 
     @staticmethod
     def _crew_task_label(crew_member: CrewMate) -> str:
+        if not crew_member.alive:
+            return "Dead"
         task = crew_member.task
         if task is None:
+            if crew_member.idle_target_area is not None:
+                return Game._format_task_text("patrol", crew_member.idle_target_area)
             return "Idle"
         return Game._format_task_text(task.kind, task.target)
 
@@ -452,6 +463,7 @@ class Game:
             "guard": "Guard",
             "escort": "Escort",
             "detain": "Detain",
+            "patrol": "Patrol",
         }.get(kind, kind.replace("_", " ").capitalize())
         return f"{verb} {target.replace('_', ' ')}"
 

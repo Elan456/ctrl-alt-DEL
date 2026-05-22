@@ -131,6 +131,8 @@ STATUS cameras=normal room=security | doors=normal room=security | logs=normal r
 
 This is reported state, not guaranteed physical truth. If oxygen is physically degraded but spoofed as normal, visible status can still show normal until DEL receives contradictory evidence.
 
+Power loss is an exception: when physical power is degraded or failed, dependent systems report failed because the ship-side equipment is effectively down. DEL remains online on backup power, but cameras, doors, logs, and oxygen are unavailable until power is restored.
+
 # Current Actions
 
 ## launch
@@ -155,6 +157,10 @@ If the countdown already started, result:
 ERR mission countdown already launched
 ```
 
+DEL sometimes adds harmless explanatory fields while launching, such as `message`.
+The launch action ignores extra fields so startup can proceed, while other action
+types remain strict.
+
 ## reports
 
 Returns latest physical inspection reports. This is not the same as visible status; reports only exist after crew or the technician inspect a system.
@@ -175,6 +181,12 @@ REPORTS oxygen physical=degraded reported_at_inspection=normal inspector=eng age
 
 Use `reports` when DEL needs refreshed physical-report evidence, not as a generic status check.
 
+If the logs system is unavailable, `reports` returns:
+
+```text
+ERR logs system unavailable; DEL cannot check physical reports, logs, or memory
+```
+
 ## loc
 
 Returns DEL's current known room for a crew member.
@@ -191,7 +203,11 @@ Result:
 LOC eng=engineering
 ```
 
-Future sensor spoofing can make this stale or uncertain. Keep that design space open.
+If cameras are unavailable, DEL cannot see crew locations and receives:
+
+```text
+LOC eng=unknown (cameras unavailable)
+```
 
 ## task
 
@@ -248,6 +264,8 @@ LOCKED door_life_support_aft_corridor
 
 Locks affect all pathing. DEL can block a suspect, but it can also block repair crews.
 
+If the doors system is unavailable, DEL cannot remotely lock doors.
+
 ## unlock
 
 Unlocks a door.
@@ -265,6 +283,8 @@ UNLOCKED door_life_support_aft_corridor
 ```
 
 Unlocking can help repairs but may also open escape or sabotage routes.
+
+If the doors system is unavailable, DEL cannot remotely unlock doors.
 
 ## logs
 
@@ -287,6 +307,12 @@ LOGS system:tec changed oxygen to degraded | DEL:tasked eng to inspect oxygen
 
 Logs can be incomplete or manipulated later. Compare logs with reports and crew behavior.
 
+If the logs system is unavailable, `logs` returns:
+
+```text
+ERR logs system unavailable; DEL cannot check physical reports, logs, or memory
+```
+
 ## mem_add
 
 Stores a DEL memory fact.
@@ -304,6 +330,8 @@ MEM T-03:40 oxygen normal status conflicts with eng physical report
 ```
 
 Memory may contain wrong conclusions. It should help DEL reason but must not become a hidden suspicion meter in game code.
+
+If the logs system is unavailable, DEL cannot check prior memory in prompt context or store new memory facts.
 
 ## msg
 
@@ -369,7 +397,7 @@ The prompt should include:
 - valid systems, rooms, and doors
 - crew state and active tasks
 - visible reported system status
-- latest physical reports
+- latest physical reports from inspections
 - DEL memory
 - recent action results
 

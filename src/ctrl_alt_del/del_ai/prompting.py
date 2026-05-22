@@ -7,7 +7,10 @@ from ctrl_alt_del.systems import SystemKind
 
 def build_prompt(del_controller: object) -> str:
     recent_actions = "\n".join(del_controller.terminal_history[-12:]) or "No recent action results."
-    memory = "\n".join(f"- {fact}" for fact in del_controller.memory[-8:]) or "- none"
+    if del_controller.ship.logs_available:
+        memory = "\n".join(f"- {fact}" for fact in del_controller.memory[-8:]) or "- none"
+    else:
+        memory = "- unavailable: logs system unavailable"
     arrival_timestamp = arrival_time(del_controller.ship.arrival_seconds_remaining)
     crew_roles = ", ".join(
         f"{crew_id}:{crew_data['role']}"
@@ -32,7 +35,7 @@ def build_prompt(del_controller: object) -> str:
         f"- doors: {doors}\n\n"
         f"Crew state:\n{crew_state}\n\n"
         f"Visible system status:\n{visible_status}\n\n"
-        f"Latest physical reports:\n{physical_reports}\n\n"
+        f"Latest physical reports from inspections:\n{physical_reports}\n\n"
         f"DEL memory:\n{memory}\n\n"
         f"Recent action results:\n{recent_actions}"
     )
@@ -49,13 +52,18 @@ def _crew_state_lines(del_controller: object) -> list[str]:
     for crew_id in del_controller._crew_ids():
         crew_member = del_controller.ship.crew[crew_id]
         role = del_controller.command_contract["crew"][crew_id]["role"]
-        room = getattr(crew_member, "room", "unknown")
+        room = del_controller.ship.del_visible_crew_location(crew_id)
         task = getattr(crew_member, "task", None)
-        if task is None:
+        if not getattr(crew_member, "alive", True):
+            task_summary = "dead"
+        elif task is None:
             task_summary = "idle"
         else:
             task_state = getattr(crew_member, "task_state", "assigned")
-            task_summary = f"{getattr(task, 'kind', 'unknown')} {getattr(task, 'target', 'unknown')} ({task_state})"
+            task_summary = (
+                f"{getattr(task, 'kind', 'unknown')} "
+                f"{getattr(task, 'target', 'unknown')} ({task_state})"
+            )
         lines.append(f"- {crew_id}:{role} room={room} task={task_summary}")
     return lines
 
@@ -69,6 +77,9 @@ def _visible_status(del_controller: object) -> str:
 
 
 def _physical_reports(del_controller: object) -> str:
+    if not del_controller.ship.logs_available:
+        return "REPORTS unavailable: logs system unavailable"
+
     now = monotonic()
     summaries: list[str] = []
     for system_id in del_controller._system_ids():

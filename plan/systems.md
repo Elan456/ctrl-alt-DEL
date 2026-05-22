@@ -280,3 +280,11 @@ Required beats:
 - one chance to frame or misdirect another crew member
 
 This proves the core game without building a full ship simulation.
+
+# Interactions
+
+- If the camera's are disabled then DEL can't know the location of crew members
+- If the power is degegraded, then almost everything goes down, (DEL has backup power we can say)
+- If oxygen goes down for too long, then all the crew mates die
+- If the doors goes down, then DEL cannot lock or unlock doors remotely
+- If the logs system goes down, then DEL can no longer check for physical reports or it's previous memory 

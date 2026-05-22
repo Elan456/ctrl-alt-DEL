@@ -13,6 +13,10 @@ from ctrl_alt_del.systems import ShipSystem, SystemKind, SystemState
 
 RectTuple = tuple[int, int, int, int]
 Point = tuple[float, float]
+POWER_DEPENDENT_SYSTEMS = frozenset(
+    {SystemKind.OXYGEN, SystemKind.DOORS, SystemKind.CAMERAS, SystemKind.LOGS}
+)
+OXYGEN_FATAL_EXPOSURE_SECONDS = 60.0
 
 
 @dataclass(frozen=True)
@@ -87,6 +91,7 @@ class Ship:
     locked_doors: set[str] = field(default_factory=set)
     arrival_seconds_remaining: float = 300.0
     launched: bool = False
+    oxygen_down_seconds: float = 0.0
 
     @classmethod
     def prototype(cls) -> Ship:
@@ -106,9 +111,9 @@ class Ship:
         return ship
 
     def tick(self, dt: float) -> None:
-        if not self.launched:
-            return
-        self.arrival_seconds_remaining = max(0.0, self.arrival_seconds_remaining - dt)
+        self._update_oxygen_exposure(dt)
+        if self.launched:
+            self.arrival_seconds_remaining = max(0.0, self.arrival_seconds_remaining - dt)
 
     def launch(self, actor: str = "DEL") -> bool:
         if self.launched:
@@ -122,9 +127,13 @@ class Ship:
         self.crew[crew_id] = crew_member
         self.record("crew", f"{crew_id} registered", target=crew_id)
 
-    def status(self, system_name: str) -> dict[str, str | bool]:
+    def status(self, system_name: str) -> dict[str, str]:
         system = self.systems[SystemKind(system_name)]
-        return system.report()
+        return {
+            "system": system.kind.value,
+            "reported_state": self.reported_state(system.kind).value,
+            "room": system.room,
+        }
 
     def damage_system(
         self,
@@ -164,8 +173,8 @@ class Ship:
             timestamp=monotonic(),
             system=system,
             inspector=inspector,
-            physical_state=ship_system.physical_state,
-            reported_state=ship_system.reported_state,
+            physical_state=self.effective_physical_state(system),
+            reported_state=self.reported_state(system),
             room=ship_system.room,
         )
         self.physical_reports[system] = report
@@ -185,6 +194,11 @@ class Ship:
         crew_member = self.crew[crew_id]
         return getattr(crew_member, "room")
 
+    def del_visible_crew_location(self, crew_id: str) -> str:
+        if not self.cameras_available:
+            return "unknown"
+        return self.crew_location(crew_id)
+
     def set_crew_location_from_point(self, crew_id: str, point: tuple[int, int]) -> None:
         area = self.area_at_point(point)
         if area is None:
@@ -202,6 +216,37 @@ class Ship:
             raise KeyError(f"unknown door {door_id}")
         self.locked_doors.discard(door_id)
         self.record("door", f"{actor} unlocked {door_id}", door_id)
+
+    def effective_physical_state(self, system: SystemKind) -> SystemState:
+        if (
+            system in POWER_DEPENDENT_SYSTEMS
+            and self.systems[SystemKind.POWER].physical_state != SystemState.NORMAL
+        ):
+            return SystemState.FAILED
+        return self.systems[system].physical_state
+
+    def reported_state(self, system: SystemKind) -> SystemState:
+        if (
+            system in POWER_DEPENDENT_SYSTEMS
+            and self.systems[SystemKind.POWER].physical_state != SystemState.NORMAL
+        ):
+            return SystemState.FAILED
+        return self.systems[system].reported_state
+
+    def system_available(self, system: SystemKind) -> bool:
+        return self.effective_physical_state(system) == SystemState.NORMAL
+
+    @property
+    def cameras_available(self) -> bool:
+        return self.system_available(SystemKind.CAMERAS)
+
+    @property
+    def remote_doors_available(self) -> bool:
+        return self.system_available(SystemKind.DOORS)
+
+    @property
+    def logs_available(self) -> bool:
+        return self.system_available(SystemKind.LOGS)
 
     def connected_rooms(self, room_id: str) -> list[str]:
         connected: list[str] = []
@@ -358,6 +403,31 @@ class Ship:
 
     def _is_corridor_end_locked(self, corridor: Corridor, room_id: str) -> bool:
         return any(door.at == room_id and door.door_id in self.locked_doors for door in corridor.doors)
+
+    def _update_oxygen_exposure(self, dt: float) -> None:
+        if self.effective_physical_state(SystemKind.OXYGEN) == SystemState.NORMAL:
+            self.oxygen_down_seconds = 0.0
+            return
+
+        self.oxygen_down_seconds += dt
+        if self.oxygen_down_seconds < OXYGEN_FATAL_EXPOSURE_SECONDS:
+            return
+
+        newly_dead = []
+        for crew_member in self.crew.values():
+            if not getattr(crew_member, "alive", True):
+                continue
+            setattr(crew_member, "alive", False)
+            clear_task = getattr(crew_member, "clear_task", None)
+            if clear_task is not None:
+                clear_task()
+            newly_dead.append(getattr(crew_member, "crew_id", "unknown"))
+        if newly_dead:
+            self.record(
+                "system",
+                f"oxygen failure killed crew: {', '.join(sorted(newly_dead))}",
+                SystemKind.OXYGEN.value,
+            )
 
     def _load_layout(self, data: dict[str, Any]) -> None:
         rooms_data = data.get("rooms")

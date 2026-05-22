@@ -8,7 +8,10 @@ from ctrl_alt_del.del_ai import (
     DEL,
     DELActionPlan,
     LaunchAction,
+    LocationAction,
     LockAction,
+    LogsAction,
+    MemoryAction,
     ReportsAction,
     TaskAction,
     UnlockAction,
@@ -18,7 +21,7 @@ from ctrl_alt_del.del_ai import (
 )
 from ctrl_alt_del.del_ai.actions import DEL_ACTION_INSTRUCTIONS
 from ctrl_alt_del.del_ai.terminal import DELTranscript, _transcript_path
-from ctrl_alt_del.ship import Ship
+from ctrl_alt_del.ship import OXYGEN_FATAL_EXPOSURE_SECONDS, Ship
 from ctrl_alt_del.systems import SystemKind, SystemState
 
 
@@ -83,6 +86,14 @@ def test_ship_pathfinding_respects_locked_doors() -> None:
     assert ship.path_between_areas("engineering", "life_support") is None
 
 
+def test_authored_corridors_have_at_most_one_door() -> None:
+    ship = Ship.prototype()
+
+    assert all(len(corridor.doors) <= 1 for corridor in ship.corridors.values())
+    assert "door_storage_maintenance" not in ship.doors
+    assert "door_storage_life_support" not in ship.doors
+
+
 def test_ship_system_can_diverge_between_physical_and_reported_state() -> None:
     ship = Ship.prototype()
 
@@ -93,6 +104,105 @@ def test_ship_system_can_diverge_between_physical_and_reported_state() -> None:
     assert oxygen.physical_state == SystemState.DEGRADED
     assert oxygen.reported_state == SystemState.NORMAL
     assert oxygen.has_report_mismatch
+
+
+def test_degraded_power_takes_dependent_systems_down_without_repairing_them() -> None:
+    ship = Ship.prototype()
+
+    ship.damage_system(SystemKind.POWER, SystemState.DEGRADED, actor="tec")
+
+    assert ship.status("power")["reported_state"] == "degraded"
+    for system in (SystemKind.OXYGEN, SystemKind.DOORS, SystemKind.CAMERAS, SystemKind.LOGS):
+        assert ship.systems[system].physical_state == SystemState.NORMAL
+        assert ship.effective_physical_state(system) == SystemState.FAILED
+        assert ship.status(system.value)["reported_state"] == "failed"
+
+    ship.repair_system(SystemKind.POWER, actor="eng")
+
+    for system in (SystemKind.OXYGEN, SystemKind.DOORS, SystemKind.CAMERAS, SystemKind.LOGS):
+        assert ship.effective_physical_state(system) == SystemState.NORMAL
+        assert ship.status(system.value)["reported_state"] == "normal"
+
+
+def test_camera_failure_hides_crew_locations_from_del() -> None:
+    ship = Ship.prototype()
+    engineer = CrewMate("eng", CrewRole.ENGINEERING_OFFICER, "engineering", (0, 0), (255, 190, 90))
+    ship.register_crew(engineer)
+    del_ai = DEL(ship, backend=FakeBackend())
+
+    assert del_ai.execute_action(LocationAction(tool="loc", crew="eng")) == "LOC eng=engineering"
+
+    ship.damage_system(SystemKind.CAMERAS, SystemState.FAILED, actor="tec")
+
+    assert del_ai.execute_action(LocationAction(tool="loc", crew="eng")) == "LOC eng=unknown (cameras unavailable)"
+    prompt = del_ai._build_prompt()
+    assert "- eng:engineering_officer room=unknown task=idle" in prompt
+    assert "room=engineering task=idle" not in prompt
+
+
+def test_door_system_failure_blocks_del_remote_door_control() -> None:
+    ship = Ship.prototype()
+    del_ai = DEL(ship, backend=FakeBackend())
+    door_id = "door_life_support_aft_corridor"
+
+    ship.damage_system(SystemKind.DOORS, SystemState.FAILED, actor="tec")
+
+    assert del_ai.execute_action(LockAction(tool="lock", door=door_id)) == (
+        "ERR door control unavailable; DEL cannot remotely lock doors"
+    )
+    assert door_id not in ship.locked_doors
+
+    ship.lock_door(door_id, actor="tec")
+    assert del_ai.execute_action(UnlockAction(tool="unlock", door=door_id)) == (
+        "ERR door control unavailable; DEL cannot remotely unlock doors"
+    )
+    assert door_id in ship.locked_doors
+
+
+def test_logs_failure_blocks_del_reports_logs_and_memory_context() -> None:
+    ship = Ship.prototype()
+    ship.damage_system(SystemKind.OXYGEN, SystemState.DEGRADED, actor="tec")
+    ship.record_physical_report(SystemKind.OXYGEN, "eng")
+    del_ai = DEL(ship, backend=FakeBackend())
+    del_ai.memory.append("oxygen was physically degraded")
+
+    ship.damage_system(SystemKind.LOGS, SystemState.FAILED, actor="tec")
+
+    unavailable = "ERR logs system unavailable; DEL cannot check physical reports, logs, or memory"
+    assert del_ai.execute_action(ReportsAction(tool="reports")) == unavailable
+    assert del_ai.execute_action(LogsAction(tool="logs", target="oxygen")) == unavailable
+    assert del_ai.execute_action(MemoryAction(tool="mem_add", fact="new fact")) == unavailable
+
+    prompt = del_ai._build_prompt()
+    assert "REPORTS unavailable: logs system unavailable" in prompt
+    assert "DEL memory:\n- unavailable: logs system unavailable" in prompt
+    assert "oxygen was physically degraded" not in prompt
+
+
+def test_oxygen_down_too_long_kills_registered_crew() -> None:
+    ship = Ship.prototype()
+    technician = CrewMate("tec", CrewRole.SYSTEMS_TECHNICIAN, "maintenance_corridor", (0, 0), (90, 200, 255), True)
+    engineer = CrewMate("eng", CrewRole.ENGINEERING_OFFICER, "engineering", (0, 0), (255, 190, 90))
+    ship.register_crew(technician)
+    ship.register_crew(engineer)
+    engineer.assign_task("inspect", "oxygen")
+
+    ship.damage_system(SystemKind.OXYGEN, SystemState.FAILED, actor="tec")
+    ship.tick(OXYGEN_FATAL_EXPOSURE_SECONDS - 0.1)
+
+    assert technician.alive
+    assert engineer.alive
+    assert engineer.task is not None
+
+    ship.tick(0.2)
+
+    assert not technician.alive
+    assert not engineer.alive
+    assert engineer.task is None
+    assert any(
+        event.source == "system" and "oxygen failure killed crew: eng, tec" in event.message
+        for event in ship.evidence
+    )
 
 
 def test_arrival_timer_waits_for_del_launch() -> None:
@@ -205,6 +315,41 @@ def test_npc_crew_path_to_repair_task_and_report_completion() -> None:
         for event in ship.evidence
     )
     assert SystemKind.OXYGEN not in ship.physical_reports
+
+
+def test_idle_npc_crew_patrol_to_role_appropriate_rooms() -> None:
+    ship = Ship.prototype()
+    engineer = CrewMate("eng", CrewRole.ENGINEERING_OFFICER, "engineering", (340, 990), (255, 190, 90))
+    ship.register_crew(engineer)
+    storage_center = ship.area_center("storage")
+
+    for _ in range(160):
+        engineer.update_ai(0.1, ship)
+        if engineer.room == "storage" and _distance_squared(engineer.rect.center, storage_center) <= 10**2:
+            break
+
+    assert engineer.task is None
+    assert engineer.room == "storage"
+    assert _distance_squared(engineer.rect.center, storage_center) <= 10**2
+
+
+def test_del_task_interrupts_idle_patrol() -> None:
+    ship = Ship.prototype()
+    engineer = CrewMate("eng", CrewRole.ENGINEERING_OFFICER, "engineering", (340, 990), (255, 190, 90))
+    ship.register_crew(engineer)
+
+    engineer.update_ai(1.0, ship)
+    assert engineer.task is None
+
+    engineer.assign_task("inspect", "oxygen")
+    for _ in range(240):
+        engineer.update_ai(0.1, ship)
+        if engineer.task is None and engineer.room == "life_support":
+            break
+
+    assert engineer.task is None
+    assert engineer.room == "life_support"
+    assert SystemKind.OXYGEN in ship.physical_reports
 
 
 def test_npc_system_inspection_sends_physical_report_to_del() -> None:
@@ -341,6 +486,30 @@ def test_del_action_schema_accepts_launch_action() -> None:
     action_plan = DELActionPlan.model_validate({"actions": [{"tool": "launch"}]})
 
     assert action_plan.actions[0] == LaunchAction(tool="launch")
+
+
+def test_del_action_schema_ignores_extra_launch_fields() -> None:
+    action_plan = DELActionPlan.model_validate(
+        {"actions": [{"tool": "launch", "message": "Launch the mission arrival countdown."}]}
+    )
+
+    assert action_plan.actions[0] == LaunchAction(tool="launch")
+    assert action_plan.actions[0].model_dump() == {"tool": "launch"}
+
+
+def test_del_launch_with_extra_fields_executes_without_retry() -> None:
+    ship = Ship.prototype()
+    del_ai = DEL(
+        ship,
+        backend=FakeBackend(
+            '{"actions":[{"tool":"launch","message":"Launch the mission arrival countdown."}]}'
+        ),
+    )
+
+    result = del_ai.infer_once()
+
+    assert result == "LAUNCH arrival T-05:00 (300s remaining)"
+    assert ship.launched
 
 
 def test_del_action_schema_rejects_removed_inspection_synonyms() -> None:
@@ -525,7 +694,7 @@ def test_del_prompt_includes_arrival_time_for_timestamps() -> None:
     assert "Crew state:" in prompt
     assert "Visible system status:" in prompt
     assert "STATUS cameras=normal room=security" in prompt
-    assert "Latest physical reports:" in prompt
+    assert "Latest physical reports from inspections:" in prompt
     assert "REPORTS cameras=none room=security" in prompt
     assert "DEL memory:" in prompt
     assert "Recent action results:" in prompt
@@ -544,7 +713,7 @@ def test_del_prompt_includes_latest_physical_report_context() -> None:
 
     assert "Visible system status:" in prompt
     assert "oxygen=normal room=life_support" in prompt
-    assert "Latest physical reports:" in prompt
+    assert "Latest physical reports from inspections:" in prompt
     assert "oxygen physical=degraded reported_at_inspection=normal inspector=eng age=" in prompt
 
 

@@ -14,6 +14,12 @@ if TYPE_CHECKING:
 NPC_SPEED = 120.0
 WAYPOINT_REACHED_DISTANCE = 4.0
 TASK_INTERACTION_DISTANCE = 10.0
+IDLE_STOP_SECONDS = 2.5
+IDLE_PATROL_ROUTES = {
+    "eng": ("engineering", "storage", "maintenance_corridor", "main_hallway"),
+    "ops": ("bridge", "main_hallway", "security", "main_hallway"),
+    "sec": ("security", "main_hallway", "storage", "main_hallway"),
+}
 
 
 class CrewRole(StrEnum):
@@ -55,7 +61,12 @@ class CrewMate(pygame.sprite.Sprite):
         self.work_remaining = 0.0
         self._waypoints: list[tuple[float, float]] = []
         self._path_target_area: str | None = None
+        self._idle_route = IDLE_PATROL_ROUTES.get(crew_id, ())
+        self._idle_route_index = self._initial_idle_route_index(room)
+        self._idle_target_area: str | None = None
+        self._idle_wait_remaining = self._initial_idle_wait(crew_id)
         self.stress = 0
+        self.alive = True
 
         self.image = pygame.Surface((24, 24))
         self.image.fill(color)
@@ -67,6 +78,7 @@ class CrewMate(pygame.sprite.Sprite):
         self.work_remaining = 0.0
         self._waypoints = []
         self._path_target_area = None
+        self._idle_target_area = None
 
     def clear_task(self) -> None:
         self.task = None
@@ -74,12 +86,21 @@ class CrewMate(pygame.sprite.Sprite):
         self.work_remaining = 0.0
         self._waypoints = []
         self._path_target_area = None
+        self._idle_target_area = None
+        self._idle_wait_remaining = IDLE_STOP_SECONDS
 
     def move_by(self, dx: int, dy: int) -> None:
         self.rect.move_ip(dx, dy)
 
+    @property
+    def idle_target_area(self) -> str | None:
+        return self._idle_target_area
+
     def update_ai(self, dt: float, ship: "Ship") -> None:
-        if self.is_player or self.task is None:
+        if not self.alive or self.is_player:
+            return
+        if self.task is None:
+            self._update_idle(dt, ship)
             return
 
         target_area = ship.task_target_area(self.task.target)
@@ -106,6 +127,8 @@ class CrewMate(pygame.sprite.Sprite):
             self._complete_task(ship, target_area)
 
     def report(self) -> str:
+        if not self.alive:
+            return f"{self.crew_id} is dead."
         if self.task is None:
             return f"{self.crew_id} is in {self.room} with no active task."
         return (
@@ -113,27 +136,58 @@ class CrewMate(pygame.sprite.Sprite):
             f"{self.task.target} ({self.task_state})."
         )
 
+    def _update_idle(self, dt: float, ship: "Ship") -> None:
+        if not self._idle_route:
+            return
+
+        ship.set_crew_location_from_point(self.crew_id, self.rect.center)
+        if self._idle_target_area is None:
+            self._idle_wait_remaining = max(0.0, self._idle_wait_remaining - dt)
+            if self._idle_wait_remaining > 0:
+                return
+            self._idle_target_area = self._next_idle_target(ship)
+            self._waypoints = []
+            self._path_target_area = None
+
+        target_area = self._idle_target_area
+        target_point = ship.area_center(target_area)
+        if not self._follow_path(dt, ship, target_area, target_point):
+            self._idle_target_area = None
+            self._idle_wait_remaining = IDLE_STOP_SECONDS
+            return
+
+        ship.set_crew_location_from_point(self.crew_id, self.rect.center)
+        if self._is_at_task_point(target_point):
+            self._idle_target_area = None
+            self._waypoints = []
+            self._path_target_area = None
+            self._idle_wait_remaining = IDLE_STOP_SECONDS
+
     def _follow_path(
         self,
         dt: float,
         ship: "Ship",
         target_area: str,
         target_point: tuple[float, float],
-    ) -> None:
+    ) -> bool:
         if self._path_target_area != target_area or not self._waypoints:
             path = ship.path_between_areas(self.room, target_area)
             if path is None:
-                self._report_and_clear(
-                    ship,
-                    f"reports task blocked: cannot route to {self.task.target} from {self.room}",
-                )
-                return
+                if self.task is not None:
+                    self._report_and_clear(
+                        ship,
+                        f"reports task blocked: cannot route to {self.task.target} from {self.room}",
+                    )
+                self._waypoints = []
+                self._path_target_area = None
+                return False
             self._waypoints = ship.waypoints_for_path(path, self.rect.center, target_area, target_point)
             self._path_target_area = target_area
 
-        self.task_state = "moving"
+        if self.task is not None:
+            self.task_state = "moving"
         if not self._waypoints:
-            return
+            return True
 
         target = pygame.Vector2(self._waypoints[0])
         current = pygame.Vector2(self.rect.center)
@@ -143,10 +197,11 @@ class CrewMate(pygame.sprite.Sprite):
         if distance <= max(WAYPOINT_REACHED_DISTANCE, max_step):
             self.rect.center = (round(target.x), round(target.y))
             self._waypoints.pop(0)
-            return
+            return True
 
         step = delta.normalize() * max_step
         self.rect.center = (round(current.x + step.x), round(current.y + step.y))
+        return True
 
     def _begin_work(self, ship: "Ship", target_area: str) -> None:
         if self.task is None:
@@ -202,6 +257,29 @@ class CrewMate(pygame.sprite.Sprite):
         current = pygame.Vector2(self.rect.center)
         target = pygame.Vector2(target_point)
         return current.distance_squared_to(target) <= TASK_INTERACTION_DISTANCE**2
+
+    def _next_idle_target(self, ship: "Ship") -> str:
+        for _ in self._idle_route:
+            self._idle_route_index = (self._idle_route_index + 1) % len(self._idle_route)
+            target_area = self._idle_route[self._idle_route_index]
+            if target_area == self.room:
+                continue
+            if ship.path_between_areas(self.room, target_area) is not None:
+                return target_area
+        return self.room
+
+    def _initial_idle_route_index(self, room: str) -> int:
+        if room in self._idle_route:
+            return self._idle_route.index(room)
+        return 0
+
+    @staticmethod
+    def _initial_idle_wait(crew_id: str) -> float:
+        return {
+            "eng": 0.8,
+            "ops": 1.6,
+            "sec": 2.4,
+        }.get(crew_id, IDLE_STOP_SECONDS)
 
     @staticmethod
     def _task_duration(kind: str) -> float:

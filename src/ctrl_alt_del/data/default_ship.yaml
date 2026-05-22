@@ -79,16 +79,10 @@ corridors:
       - id: door_engineering_maintenance
         at: engineering
         rect: [496, 988, 48, 104]
-      - id: door_storage_maintenance
-        at: storage
-        rect: [736, 988, 48, 104]
   storage_to_life_support:
     connects: [storage, life_support]
     rect: [1000, 1000, 300, 80]
     doors:
-      - id: door_storage_life_support
-        at: storage
-        rect: [1016, 988, 48, 104]
       - id: door_life_support_storage
         at: life_support
         rect: [1236, 988, 48, 104]

@@ -37,6 +37,9 @@ Key concepts:
 - `Ship.prototype()` loads `src/ctrl_alt_del/data/default_ship.yaml`, creates systems, and records initialization evidence.
 - Layout is authored in YAML. Do not add procedural map generation for the prototype.
 - Every `ShipSystem` has physical state and reported state. DEL sees reported state unless a report/log/action exposes more.
+- `Ship.effective_physical_state(...)` applies cross-system effects. Degraded or failed power makes oxygen, doors, cameras, and logs effectively failed while DEL remains online on backup power.
+- Camera outages hide crew rooms from DEL. Door outages block DEL remote lock/unlock actions. Log outages block DEL reports, evidence logs, and memory visibility.
+- `Ship.tick(dt)` tracks oxygen exposure independently from launch state. If oxygen remains effectively down too long, registered crew are marked dead and active tasks are cleared.
 - `Ship.tick(dt)` only decrements `arrival_seconds_remaining` after `Ship.launch()` sets `launched = True`.
 - `record(...)` appends evidence events. Use it for player actions, DEL actions, crew reports, and system events that DEL may later inspect.
 
@@ -47,6 +50,8 @@ Key concepts:
 Current crew model:
 
 - `CrewMate.task` is a `CrewTask(kind, target)` or `None`.
+- `CrewMate.alive` gates NPC AI and player movement. Oxygen failure can mark crew dead through `Ship.tick(dt)`.
+- Idle NPC crew follow deterministic role patrol routes through existing authored rooms and corridors. DEL tasks interrupt patrol movement immediately.
 - NPC crew path to task targets, begin work, then report completion or blockage.
 - The player is also a `CrewMate`, but `update_ai` ignores `is_player` crew.
 - Repair/reset tasks physically repair systems. Inspection tasks create physical reports.
@@ -73,7 +78,9 @@ Current action behavior:
 - `core.infer_once()` executes every action in order and joins results with ` | `.
 - `commands.execute_action(...)` remains useful for tests and direct calls; `execute_actions(...)` runs a batch.
 - Action validity is split between Pydantic literals in `actions.py` and data-driven role/target rules in `del_commands.yaml`.
+- `LaunchAction` ignores harmless extra fields so local models that emit `{"tool":"launch","message":"..."}` still start the countdown. Other action models remain strict.
 - Invalid actions should return explicit `ERR ...` output when they pass schema validation but fail game-state validation.
+- DEL tools also respect system availability: `loc` returns unknown when cameras are down, `lock`/`unlock` fail when doors are down, and `reports`/`logs`/`mem_add` fail when logs are down.
 
 Current DEL tools:
 
@@ -102,11 +109,13 @@ Allowed prompt context:
 - valid crew, task jobs, systems, rooms, doors
 - crew state and active tasks
 - visible reported system status
-- latest physical reports
+- latest physical reports from inspections
 - DEL memory
 - recent action results
 
 Do not put hidden physical truth directly into the prompt. If DEL needs physical truth, it should get it through a physical report, log, camera-like evidence, or another in-world channel.
+
+When cameras are unavailable, crew rooms are shown as unknown. When logs are unavailable, physical reports from inspections and DEL memory are shown as unavailable rather than listing stored contents.
 
 Never label `tec` or any other crew member as `player`, `human`, `user-controlled`, or equivalent in DEL prompt context, transcript-visible action results, reports, logs, memory, or examples.
 

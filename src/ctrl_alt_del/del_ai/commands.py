@@ -67,6 +67,9 @@ class ActionExecutorMixin:
         return result
 
     def _reports(self, action: ReportsAction) -> str:
+        if not self.ship.logs_available:
+            return self._logs_unavailable()
+
         now = monotonic()
         summaries: list[str] = []
         system_ids = [action.system] if action.system is not None else self._system_ids()
@@ -93,7 +96,9 @@ class ActionExecutorMixin:
         crew_id = action.crew
         if not self._is_crew(crew_id):
             return self._invalid_target("loc", crew_id, ["crew"])
-        return f"LOC {crew_id}={self.ship.crew_location(crew_id)}"
+        if not self.ship.cameras_available:
+            return f"LOC {crew_id}=unknown (cameras unavailable)"
+        return f"LOC {crew_id}={self.ship.del_visible_crew_location(crew_id)}"
 
     def _task(self, action: TaskAction) -> str:
         validation_error = self._validate_task(action)
@@ -109,6 +114,8 @@ class ActionExecutorMixin:
         door_id = action.door
         if not self._is_door(door_id):
             return self._invalid_target("lock", door_id, ["door"])
+        if not self.ship.remote_doors_available:
+            return self._doors_unavailable("lock")
         self.ship.lock_door(door_id)
         return f"LOCKED {door_id}"
 
@@ -116,10 +123,15 @@ class ActionExecutorMixin:
         door_id = action.door
         if not self._is_door(door_id):
             return self._invalid_target("unlock", door_id, ["door"])
+        if not self.ship.remote_doors_available:
+            return self._doors_unavailable("unlock")
         self.ship.unlock_door(door_id)
         return f"UNLOCKED {door_id}"
 
     def _logs(self, action: LogsAction) -> str:
+        if not self.ship.logs_available:
+            return self._logs_unavailable()
+
         target = action.target
         if target is not None and self._target_type(target) not in self._command_target_types("logs"):
             return self._invalid_target("logs", target, self._command_target_types("logs"))
@@ -129,6 +141,9 @@ class ActionExecutorMixin:
         return "LOGS " + " | ".join(f"{event.source}:{event.message}" for event in events)
 
     def _mem_add(self, action: MemoryAction) -> str:
+        if not self.ship.logs_available:
+            return self._logs_unavailable()
+
         fact = action.fact.strip()
         if not fact:
             return "ERR mem_add requires a fact"
@@ -263,6 +278,14 @@ class ActionExecutorMixin:
 
     def _is_door(self, target: str) -> bool:
         return target in self.ship.doors
+
+    @staticmethod
+    def _logs_unavailable() -> str:
+        return "ERR logs system unavailable; DEL cannot check physical reports, logs, or memory"
+
+    @staticmethod
+    def _doors_unavailable(action: str) -> str:
+        return f"ERR door control unavailable; DEL cannot remotely {action} doors"
 
     @staticmethod
     def _remove_thinking(response: str) -> str:
