@@ -1,4 +1,6 @@
+import sys
 from time import monotonic, sleep
+from types import ModuleType, SimpleNamespace
 
 import pytest
 
@@ -15,6 +17,7 @@ from ctrl_alt_del.del_ai import (
     ReportsAction,
     TaskAction,
     UnlockAction,
+    QwenLlamaCppBackend,
     build_default_backend,
     default_qwen_model_path,
     find_qwen_model_path,
@@ -258,6 +261,42 @@ def test_del_actions_use_reported_state_and_assign_tasks() -> None:
     assert engineer.task.target == "oxygen"
 
 
+def test_del_promotes_stale_system_inspection_to_repair_when_current_evidence_is_degraded() -> None:
+    ship = Ship.prototype()
+    engineer = CrewMate("eng", CrewRole.ENGINEERING_OFFICER, "engineering", (0, 0), (255, 190, 90))
+    ship.register_crew(engineer)
+    del_ai = DEL(ship, backend=FakeBackend())
+
+    ship.damage_system(SystemKind.POWER, SystemState.DEGRADED, actor="tec")
+    result = del_ai.execute_action(TaskAction(tool="task", crew="eng", job="inspect", target="power"))
+
+    assert result == "TASK eng repair power (promoted from inspect: current reported state is degraded)"
+    assert engineer.task is not None
+    assert engineer.task.kind == "repair"
+    assert engineer.task.target == "power"
+    assert any(
+        event.source == "DEL"
+        and "promoted stale task eng inspect power to repair power: current reported state is degraded"
+        in event.message
+        for event in ship.evidence
+    )
+
+
+def test_del_does_not_promote_inspection_for_nonrepair_roles() -> None:
+    ship = Ship.prototype()
+    security = CrewMate("sec", CrewRole.SECURITY_OFFICER, "security", (0, 0), (235, 110, 110))
+    ship.register_crew(security)
+    del_ai = DEL(ship, backend=FakeBackend())
+
+    ship.damage_system(SystemKind.DOORS, SystemState.FAILED, actor="tec")
+    result = del_ai.execute_action(TaskAction(tool="task", crew="sec", job="inspect", target="doors"))
+
+    assert result == "TASK sec inspect doors"
+    assert security.task is not None
+    assert security.task.kind == "inspect"
+    assert security.task.target == "doors"
+
+
 def test_del_reports_action_returns_latest_physical_reports() -> None:
     ship = Ship.prototype()
     del_ai = DEL(ship, backend=FakeBackend())
@@ -440,6 +479,11 @@ def test_del_instructions_prioritize_repair_for_confirmed_degradation() -> None:
     assert "do not inspect it first" in DEL_ACTION_INSTRUCTIONS
     assert "If the launch state is pending, issue launch as the first action" in DEL_ACTION_INSTRUCTIONS
     assert "Choose one to three ordered ship actions" in DEL_ACTION_INSTRUCTIONS
+    assert "Only eng and tec can repair or reset systems" in DEL_ACTION_INSTRUCTIONS
+    assert "repair power first" in DEL_ACTION_INSTRUCTIONS
+    assert "player technician" not in DEL_ACTION_INSTRUCTIONS
+    report_description = DELActionPlan.model_json_schema()["$defs"]["ReportsAction"]["description"]
+    assert report_description == "Report the most recent physical inspection for every ship system."
 
 
 def test_del_action_schema_rejects_invented_task_targets() -> None:
@@ -691,15 +735,37 @@ def test_del_prompt_includes_arrival_time_for_timestamps() -> None:
     assert "Mission time: arrival T-04:32 (272s remaining)." in prompt
     assert "Launch state: pending." in prompt
     assert "Visible ids:" in prompt
+    assert "Role task permissions:" in prompt
     assert "Crew state:" in prompt
     assert "Visible system status:" in prompt
     assert "STATUS cameras=normal room=security" in prompt
+    assert "Urgent repair priorities:" in prompt
     assert "Latest physical reports from inspections:" in prompt
     assert "REPORTS cameras=none room=security" in prompt
     assert "DEL memory:" in prompt
     assert "Recent action results:" in prompt
     assert "Return a JSON object" not in prompt
     assert "actions array" not in prompt
+
+
+def test_del_prompt_includes_urgent_power_repair_priority() -> None:
+    ship = Ship.prototype()
+    technician = CrewMate("tec", CrewRole.SYSTEMS_TECHNICIAN, "maintenance_corridor", (0, 0), (90, 200, 255), True)
+    engineer = CrewMate("eng", CrewRole.ENGINEERING_OFFICER, "engineering", (0, 0), (255, 190, 90))
+    operations = CrewMate("ops", CrewRole.OPERATIONS_OFFICER, "bridge", (0, 0), (120, 220, 160))
+    ship.register_crew(technician)
+    ship.register_crew(engineer)
+    ship.register_crew(operations)
+    ship.damage_system(SystemKind.POWER, SystemState.DEGRADED, actor="tec")
+    del_ai = DEL(ship, backend=FakeBackend())
+
+    prompt = del_ai._build_prompt()
+
+    assert "- eng:engineering_officer can inspect, repair, reset" in prompt
+    assert "- ops:operations_officer can inspect" in prompt
+    assert "- power reported=degraded; assign eng repair power now." in prompt
+    assert "Power loss can make oxygen, doors, cameras, and logs report failed." in prompt
+    assert "- repair power before dependent systems: oxygen, doors, cameras, logs" in prompt
 
 
 def test_del_prompt_includes_latest_physical_report_context() -> None:
@@ -800,6 +866,16 @@ def test_qwen_model_path_can_be_configured(monkeypatch, tmp_path) -> None:
     monkeypatch.delenv("DEL_MODEL_PATH", raising=False)
 
     assert find_qwen_model_path() == model_path
+
+
+def test_qwen_backend_requires_gpu_offload(monkeypatch, tmp_path) -> None:
+    fake_llama_cpp = ModuleType("llama_cpp")
+    fake_llama_cpp.Llama = object
+    fake_llama_cpp.llama_cpp = SimpleNamespace(llama_supports_gpu_offload=lambda: False)
+    monkeypatch.setitem(sys.modules, "llama_cpp", fake_llama_cpp)
+
+    with pytest.raises(RuntimeError, match="requires llama-cpp-python with GPU offload support"):
+        QwenLlamaCppBackend(tmp_path / "model.gguf")
 
 
 def test_default_backend_downloads_missing_qwen_model(monkeypatch, tmp_path) -> None:

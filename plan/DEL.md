@@ -242,9 +242,11 @@ TASK eng repair oxygen
 Important limits:
 
 - Role permissions come from `data/del_commands.yaml`.
+- Only the systems technician and engineering officer can repair or reset systems in the prototype.
 - Crew can fail if they cannot path to the target.
 - Crew report obstruction, repair completion, physical inspection results, and other task outcomes through evidence.
 - Crew do not understand arbitrary natural-language instructions.
+- If DEL asks a repair-capable crew member to inspect a system that is now visibly degraded or failed, the executor promotes that stale inspection to a repair task and records the promotion. This is a live-evidence correction for long local inference latency, not hidden physical knowledge.
 
 ## lock
 
@@ -394,9 +396,11 @@ The prompt should include:
 - mission time and launch state
 - valid crew ids and roles
 - valid task jobs
+- role task permissions
 - valid systems, rooms, and doors
 - crew state and active tasks
 - visible reported system status
+- urgent repair priorities derived from visible status and latest visible physical reports
 - latest physical reports from inspections
 - DEL memory
 - recent action results
@@ -407,7 +411,9 @@ The prompt should emphasize:
 - do not assume hidden physical truth
 - launch before mission time can advance
 - repair confirmed degraded/failed systems without unnecessary inspection
+- repair power before dependent systems when power loss is making oxygen, doors, cameras, or logs report failed
 - inspect when reports are missing, stale, or contradictory
+- only the systems technician and engineering officer can repair/reset systems
 - avoid overbroad lockdowns that block repairs
 - do not detain everyone
 

@@ -15,6 +15,11 @@ Use:
 ~/.local/bin/uv run pytest
 ```
 
+DEL requires `llama-cpp-python` with GPU offload support. The project `uv` config forces
+`llama-cpp-python` to build from source with CUDA flags, using `nvcc` and GCC 15 as the CUDA host
+compiler; run `scripts/install-gpu.sh` to force a one-time rebuild if `.venv` already contains a
+CPU-only install.
+
 # Main Game Loop
 
 `src/ctrl_alt_del/game.py` owns pygame setup, input, rendering, and per-frame updates.
@@ -80,6 +85,7 @@ Current action behavior:
 - Action validity is split between Pydantic literals in `actions.py` and data-driven role/target rules in `del_commands.yaml`.
 - `LaunchAction` ignores harmless extra fields so local models that emit `{"tool":"launch","message":"..."}` still start the countdown. Other action models remain strict.
 - Invalid actions should return explicit `ERR ...` output when they pass schema validation but fail game-state validation.
+- If a stale model plan asks a repair-capable crew member to inspect a system that is now visibly degraded/failed, the task executor promotes that assignment to `repair` and records the promotion. This keeps long local inference passes from wasting a full cycle on inspection after fresh visible repair evidence appears.
 - DEL tools also respect system availability: `loc` returns unknown when cameras are down, `lock`/`unlock` fail when doors are down, and `reports`/`logs`/`mem_add` fail when logs are down.
 
 Current DEL tools:
@@ -107,8 +113,10 @@ Allowed prompt context:
 
 - mission time and launch state
 - valid crew, task jobs, systems, rooms, doors
+- role task permissions
 - crew state and active tasks
 - visible reported system status
+- urgent repair priorities derived from visible status and latest visible physical reports
 - latest physical reports from inspections
 - DEL memory
 - recent action results

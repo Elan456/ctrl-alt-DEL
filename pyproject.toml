@@ -26,6 +26,11 @@ build-backend = "hatchling.build"
 [tool.hatch.build.targets.wheel]
 packages = ["src/ctrl_alt_del"]
 
+[tool.uv]
+no-binary-package = ["llama-cpp-python"]
+config-settings-package = { llama-cpp-python = { "cmake.define.GGML_CUDA" = "ON", "cmake.define.CMAKE_C_COMPILER" = "/usr/bin/gcc-15", "cmake.define.CMAKE_CXX_COMPILER" = "/usr/bin/g++-15", "cmake.define.CMAKE_CUDA_HOST_COMPILER" = "/usr/bin/g++-15" } }
+extra-build-variables = { llama-cpp-python = { CMAKE_ARGS = "-DGGML_CUDA=on -DCMAKE_C_COMPILER=/usr/bin/gcc-15 -DCMAKE_CXX_COMPILER=/usr/bin/g++-15 -DCMAKE_CUDA_HOST_COMPILER=/usr/bin/g++-15", FORCE_CMAKE = "1", CC = "/usr/bin/gcc-15", CXX = "/usr/bin/g++-15", CUDAHOSTCXX = "/usr/bin/g++-15" } }
+
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 pythonpath = ["src"]

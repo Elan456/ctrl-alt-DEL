@@ -27,7 +27,7 @@ class ActionModel(BaseModel):
 
 
 class ReportsAction(ActionModel):
-    """Report the most recent physical crew/player inspection for every ship system."""
+    """Report the most recent physical inspection for every ship system."""
 
     tool: Literal["reports"]
     system: System | None = None
@@ -119,12 +119,15 @@ DEL_ACTION_INSTRUCTIONS = (
     "idle repair-capable crew member to repair or reset it immediately; do not inspect it first. "
     "Use inspect when reported status is normal and physical reports are missing, stale, or contradictory. "
     "Do not repair or reset a system unless reported state or latest physical report is degraded, failed, "
-    "or under repair. Assigned NPC crew move through ship rooms "
-    "and may report task completion or blocked paths. Prefer sec for cameras/doors inspection, eng for "
-    "power/oxygen inspection or repair, and ops for logs/bridge inspection. Avoid assigning routine work "
-    "to tec unless you specifically want the player technician to receive a work order. If a crew member "
-    "has an active task, wait for a report or choose a different available crew member. Do not assign "
-    "more than one task to the same crew member in the same action batch. Include the current T-minus "
-    "timestamp in memory, messages, or broadcasts when it will help later review."
-    "If you suspect tampering, lock doors to prevent crew members from accessing a system or trap a crew member in a room."
+    "or under repair. Only eng and tec can repair or reset systems; ops can inspect only, and sec cannot "
+    "repair systems. If power is degraded or failed while oxygen, doors, cameras, or logs also report "
+    "failed, repair power first because those dependent failures may clear when power is restored. "
+    "Assigned NPC crew move through ship rooms and may report task completion or blocked paths. Prefer "
+    "sec for cameras/doors inspection, eng for power/oxygen inspection or repair, and ops for logs/bridge "
+    "inspection. Avoid assigning routine work to tec unless you specifically want the systems technician "
+    "to receive a work order. If a crew member has an active task, wait for a report or choose a different "
+    "available crew member. Do not assign more than one task to the same crew member in the same action "
+    "batch. Include the current T-minus timestamp in memory, messages, or broadcasts when it will help "
+    "later review. If you suspect tampering, use locks to isolate a room or suspect only when that will "
+    "not block urgent repair access."
 )

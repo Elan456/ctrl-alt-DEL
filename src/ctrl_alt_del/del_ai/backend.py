@@ -38,11 +38,18 @@ class QwenLlamaCppBackend:
     ) -> None:
         try:
             from llama_cpp import Llama
+            from llama_cpp import llama_cpp as llama_cpp_lib
         except ImportError as exc:
             raise RuntimeError(
                 "Qwen model file found, but llama-cpp-python is not installed. "
                 "Run `uv sync` to install DEL's local LLM backend."
             ) from exc
+
+        if not llama_cpp_lib.llama_supports_gpu_offload():
+            raise RuntimeError(
+                "DEL requires llama-cpp-python with GPU offload support. "
+                "Run `scripts/install-gpu.sh` to rebuild llama-cpp-python with CUDA enabled."
+            )
 
         self.model_path = Path(model_path)
         self._llm = Llama(

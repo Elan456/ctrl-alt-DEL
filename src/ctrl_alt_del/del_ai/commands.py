@@ -19,6 +19,8 @@ from ctrl_alt_del.del_ai.actions import (
 )
 from ctrl_alt_del.systems import SystemKind
 
+URGENT_REPAIR_STATES = {"degraded", "failed"}
+
 
 class ActionExecutorMixin:
     def execute_action(self, action: Action) -> str:
@@ -101,6 +103,9 @@ class ActionExecutorMixin:
         return f"LOC {crew_id}={self.ship.del_visible_crew_location(crew_id)}"
 
     def _task(self, action: TaskAction) -> str:
+        original_job = action.job
+        original_target = action.target
+        action, promotion_reason = self._promote_stale_system_inspection(action)
         validation_error = self._validate_task(action)
         if validation_error is not None:
             return validation_error
@@ -108,7 +113,15 @@ class ActionExecutorMixin:
         crew_member = self.ship.crew[crew_id]
         crew_member.assign_task(job, target)
         self.ship.record("DEL", f"tasked {crew_id} to {job} {target}", crew_id)
-        return f"TASK {crew_id} {job} {target}"
+        result = f"TASK {crew_id} {job} {target}"
+        if promotion_reason is not None:
+            self.ship.record(
+                "DEL",
+                f"promoted stale task {crew_id} {original_job} {original_target} to {job} {target}: {promotion_reason}",
+                target,
+            )
+            result += f" (promoted from {original_job}: {promotion_reason})"
+        return result
 
     def _lock(self, action: LockAction) -> str:
         door_id = action.door
@@ -217,6 +230,47 @@ class ActionExecutorMixin:
                     f"allowed evidence states: {', '.join(allowed_evidence_states)}"
                 )
 
+        return None
+
+    def _promote_stale_system_inspection(self, action: TaskAction) -> tuple[TaskAction, str | None]:
+        if action.job != "inspect" or not self._is_system(action.target):
+            return action, None
+
+        crew_id = action.crew
+        if not self._is_crew(crew_id):
+            return action, None
+
+        role = self.command_contract["crew"][crew_id]["role"]
+        role_jobs = self.command_contract.get("role_task_jobs", {}).get(role, [])
+        if "repair" not in role_jobs:
+            return action, None
+
+        crew_member = self.ship.crew[crew_id]
+        if getattr(crew_member, "task", None) is not None:
+            return action, None
+
+        evidence_state = self._urgent_system_evidence_state(action.target)
+        if evidence_state is None:
+            return action, None
+
+        promoted = action.model_copy(update={"job": "repair"})
+        return promoted, evidence_state
+
+    def _urgent_system_evidence_state(self, system_id: str) -> str | None:
+        reported_state = self.ship.status(system_id)["reported_state"]
+        if reported_state in URGENT_REPAIR_STATES:
+            return f"current reported state is {reported_state}"
+
+        if not self.ship.logs_available:
+            return None
+
+        physical_report = self.ship.physical_reports.get(SystemKind(system_id))
+        if physical_report is None:
+            return None
+
+        physical_state = physical_report.physical_state.value
+        if physical_state in URGENT_REPAIR_STATES:
+            return f"latest physical report is {physical_state}"
         return None
 
     def _command_target_types(self, command: str) -> list[str]:

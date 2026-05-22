@@ -12,6 +12,14 @@ This project is intended for `uv`:
 uv run play
 ```
 
+DEL requires a `llama-cpp-python` build with GPU offload support. This project configures `uv` to
+build `llama-cpp-python` from source with CUDA enabled, using `nvcc` and GCC 15 as the CUDA host
+compiler. If an older CPU-only build is already installed in `.venv`, rebuild it once:
+
+```bash
+scripts/install-gpu.sh
+```
+
 In this environment `uv` may not be installed yet. With dependencies installed another way, the module entry point is:
 
 ```bash
@@ -20,7 +28,7 @@ python -m ctrl_alt_del
 
 `uv run play` writes DEL's action transcript to `debug/del-transcripts/` with a timestamped filename and opens a second terminal that tails it. If no terminal emulator is available, the game prints the transcript path instead. Set `CTRL_ALT_DEL_NO_TERMINAL=1` to disable the extra terminal.
 
-DEL uses Qwen's `Qwen3-8B-Q4_K_M.gguf` through `llama-cpp-python`. If the GGUF is missing, startup downloads it from `Qwen/Qwen3-8B-GGUF` into `models/`. Set `CTRL_ALT_DEL_MODEL_PATH` to use or download to a different path.
+DEL uses Qwen's `Qwen3-8B-Q4_K_M.gguf` through `llama-cpp-python`. If the GGUF is missing, startup downloads it from `Qwen/Qwen3-8B-GGUF` into `models/`. Set `CTRL_ALT_DEL_MODEL_PATH` to use or download to a different path. If `llama-cpp-python` does not report GPU offload support, startup fails with setup guidance instead of running DEL on CPU.
 
 ## Current Shape
 
