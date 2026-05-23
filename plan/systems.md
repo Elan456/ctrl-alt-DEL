@@ -115,6 +115,7 @@ Rules:
 - cameras can be looped or disabled
 - crew reports cannot be edited once made
 - physical damage remains real until repaired
+- visible failures can come from either random ship faults or sabotage; DEL should treat faults as repair pressure first and attribute blame only from supporting evidence
 
 # System Connections
 
@@ -263,6 +264,20 @@ Most sabotage should follow this pattern:
 8. DEL updates memory and escalates or de-escalates.
 
 The best play is not always staying unseen. Sometimes it is letting DEL see the wrong thing.
+
+# Random Faults
+
+The ship can also develop random system faults after DEL launches the mission countdown.
+
+Prototype rules:
+
+- random faults only affect systems that are physically normal at the time of the check
+- random faults degrade systems rather than immediately creating catastrophic failure
+- if the system is not spoofed, the fault creates an ambiguous automatic fault alarm and reported degraded state
+- if the system is spoofed, the physical fault remains hidden until an in-world report exposes it
+- random faults are not crew-attributed tamper evidence by themselves
+
+This prevents DEL from safely trapping repair-capable crew indefinitely. Any visible failure could be ordinary wear or a bad actor, so DEL needs repair access and corroborating evidence before containment.
 
 # First Playable Scenario
 

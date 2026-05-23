@@ -61,6 +61,7 @@ class CrewMate(pygame.sprite.Sprite):
         self.work_remaining = 0.0
         self._waypoints: list[tuple[float, float]] = []
         self._path_target_area: str | None = None
+        self._path_navigation_revision: int | None = None
         self._idle_route = IDLE_PATROL_ROUTES.get(crew_id, ())
         self._idle_route_index = self._initial_idle_route_index(room)
         self._idle_target_area: str | None = None
@@ -78,6 +79,7 @@ class CrewMate(pygame.sprite.Sprite):
         self.work_remaining = 0.0
         self._waypoints = []
         self._path_target_area = None
+        self._path_navigation_revision = None
         self._idle_target_area = None
 
     def clear_task(self) -> None:
@@ -86,6 +88,7 @@ class CrewMate(pygame.sprite.Sprite):
         self.work_remaining = 0.0
         self._waypoints = []
         self._path_target_area = None
+        self._path_navigation_revision = None
         self._idle_target_area = None
         self._idle_wait_remaining = IDLE_STOP_SECONDS
 
@@ -103,11 +106,11 @@ class CrewMate(pygame.sprite.Sprite):
             self._update_idle(dt, ship)
             return
 
-        target_area = ship.task_target_area(self.task.target)
+        target_area = self._task_target_area(ship)
         if target_area is None:
             self._report_and_clear(ship, f"reports task failed: unknown target {self.task.target}")
             return
-        target_point = ship.task_target_point(self.task.target)
+        target_point = self._task_target_point(ship, target_area)
         if target_point is None:
             self._report_and_clear(ship, f"reports task failed: no interaction point for {self.task.target}")
             return
@@ -148,6 +151,7 @@ class CrewMate(pygame.sprite.Sprite):
             self._idle_target_area = self._next_idle_target(ship)
             self._waypoints = []
             self._path_target_area = None
+            self._path_navigation_revision = None
 
         target_area = self._idle_target_area
         target_point = ship.area_center(target_area)
@@ -161,6 +165,7 @@ class CrewMate(pygame.sprite.Sprite):
             self._idle_target_area = None
             self._waypoints = []
             self._path_target_area = None
+            self._path_navigation_revision = None
             self._idle_wait_remaining = IDLE_STOP_SECONDS
 
     def _follow_path(
@@ -170,19 +175,30 @@ class CrewMate(pygame.sprite.Sprite):
         target_area: str,
         target_point: tuple[float, float],
     ) -> bool:
-        if self._path_target_area != target_area or not self._waypoints:
+        if (
+            self._path_target_area != target_area
+            or self._path_navigation_revision != ship.navigation_revision
+            or not self._waypoints
+        ):
             path = ship.path_between_areas(self.room, target_area)
             if path is None:
                 if self.task is not None:
+                    ship.notify_del_from_crew(
+                        self.crew_id,
+                        f"cannot route to {self.task.target} from {self.room}; route blocked",
+                        self.task.target,
+                    )
                     self._report_and_clear(
                         ship,
                         f"reports task blocked: cannot route to {self.task.target} from {self.room}",
                     )
                 self._waypoints = []
                 self._path_target_area = None
+                self._path_navigation_revision = None
                 return False
             self._waypoints = ship.waypoints_for_path(path, self.rect.center, target_area, target_point)
             self._path_target_area = target_area
+            self._path_navigation_revision = ship.navigation_revision
 
         if self.task is not None:
             self.task_state = "moving"
@@ -232,6 +248,9 @@ class CrewMate(pygame.sprite.Sprite):
                 f"physical={report.physical_state.value} "
                 f"reported={report.reported_state.value}"
             )
+        elif task.kind == "manual_unlock" and task.target in ship.doors:
+            ship.unlock_door(task.target, actor=self.crew_id)
+            message = f"reports task complete: {task.kind} {task.target}; door is unlocked"
         elif task.target in ship.doors:
             door_state = "locked" if task.target in ship.locked_doors else "unlocked"
             message = f"reports task complete: {task.kind} {task.target}; door is {door_state}"
@@ -252,6 +271,32 @@ class CrewMate(pygame.sprite.Sprite):
         except ValueError:
             return False
         return True
+
+    def _task_targets_door(self, ship: "Ship") -> bool:
+        return self.task is not None and self.task.target in ship.doors
+
+    def _task_target_area(self, ship: "Ship") -> str | None:
+        if self.task is None:
+            return None
+        if self.task.kind == "manual_unlock" and self._task_targets_door(ship):
+            return self._manual_unlock_target_area(ship)
+        return ship.task_target_area(self.task.target)
+
+    def _task_target_point(self, ship: "Ship", target_area: str) -> tuple[float, float] | None:
+        if self.task is None:
+            return None
+        if self.task.kind == "manual_unlock" and self._task_targets_door(ship):
+            return ship.area_center(target_area)
+        return ship.task_target_point(self.task.target)
+
+    def _manual_unlock_target_area(self, ship: "Ship") -> str:
+        assert self.task is not None
+        door = ship.doors[self.task.target]
+        if self.room in {door.at, door.corridor_id}:
+            return self.room
+        if ship.path_between_areas(self.room, door.at) is not None:
+            return door.at
+        return door.corridor_id
 
     def _is_at_task_point(self, target_point: tuple[float, float]) -> bool:
         current = pygame.Vector2(self.rect.center)
@@ -290,4 +335,5 @@ class CrewMate(pygame.sprite.Sprite):
             "detain": 1.5,
             "repair": 4.0,
             "reset": 3.0,
+            "manual_unlock": 2.0,
         }.get(kind, 2.0)

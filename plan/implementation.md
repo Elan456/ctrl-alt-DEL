@@ -44,9 +44,11 @@ Key concepts:
 - Every `ShipSystem` has physical state and reported state. DEL sees reported state unless a report/log/action exposes more.
 - `Ship.effective_physical_state(...)` applies cross-system effects. Degraded or failed power makes oxygen, doors, cameras, and logs effectively failed while DEL remains online on backup power.
 - Camera outages hide crew rooms from DEL. Door outages block DEL remote lock/unlock actions. Log outages block DEL reports, evidence logs, and memory visibility.
+- After launch, `Ship.tick(dt)` periodically checks for random ship faults. A random fault only targets a physically normal system, degrades it, and records an ambiguous automatic fault alarm when the fault is not hidden by spoofed reporting.
 - `Ship.tick(dt)` tracks oxygen exposure independently from launch state. If oxygen remains effectively down too long, registered crew are marked dead and active tasks are cleared.
 - `Ship.tick(dt)` only decrements `arrival_seconds_remaining` after `Ship.launch()` sets `launched = True`.
 - `record(...)` appends evidence events. Use it for player actions, DEL actions, crew reports, and system events that DEL may later inspect.
+- `notify_del_from_crew(...)` appends direct crew-to-DEL notifications (for example, blocked routing) that are injected into DEL prompt context without requiring an explicit `logs` action.
 
 # Crew AI
 
@@ -58,8 +60,10 @@ Current crew model:
 - `CrewMate.alive` gates NPC AI and player movement. Oxygen failure can mark crew dead through `Ship.tick(dt)`.
 - Idle NPC crew follow deterministic role patrol routes through existing authored rooms and corridors. DEL tasks interrupt patrol movement immediately.
 - NPC crew path to task targets, begin work, then report completion or blockage.
+- When a crew task path is blocked, crew both record evidence and push a DEL notification so routing failures appear in prompt context immediately.
 - The player is also a `CrewMate`, but `update_ai` ignores `is_player` crew.
 - Repair/reset tasks physically repair systems. Inspection tasks create physical reports.
+- Engineering `manual_unlock` tasks physically unlock targeted doors, including when DEL remote door control is unavailable.
 
 Do not add LLM reasoning to crew for the prototype. Crew are DEL's physical reach, not independent conversational agents.
 
@@ -84,8 +88,12 @@ Current action behavior:
 - `commands.execute_action(...)` remains useful for tests and direct calls; `execute_actions(...)` runs a batch.
 - Action validity is split between Pydantic literals in `actions.py` and data-driven role/target rules in `del_commands.yaml`.
 - `LaunchAction` ignores harmless extra fields so local models that emit `{"tool":"launch","message":"..."}` still start the countdown. Other action models remain strict.
+- `TaskAction` validates job-target pairs at schema level (`inspect`/`repair`/`reset` -> system, `manual_unlock` -> door, `guard` -> room, `escort`/`detain` -> crew) so malformed task combinations are rejected before execution.
 - Invalid actions should return explicit `ERR ...` output when they pass schema validation but fail game-state validation.
+- Busy crew cannot be retasked. Reassign attempts return `ERR ... already has active task ...` until the current task completes or is cleared.
 - If a stale model plan asks a repair-capable crew member to inspect a system that is now visibly degraded/failed, the task executor promotes that assignment to `repair` and records the promotion. This keeps long local inference passes from wasting a full cycle on inspection after fresh visible repair evidence appears.
+- If a model plan asks a crew member to inspect, repair, or reset a system while that crew member is a current visible evidence concern for the same system, and another idle crew member can do the job, the task executor rejects the assignment with an explicit `ERR ... evidence concern ...` result.
+- Task jobs include `manual_unlock` for door targets. Only the engineering officer can perform it.
 - DEL tools also respect system availability: `loc` returns unknown when cameras are down, `lock`/`unlock` fail when doors are down, and `reports`/`logs`/`mem_add` fail when logs are down.
 
 Current DEL tools:
@@ -116,14 +124,20 @@ Allowed prompt context:
 - role task permissions
 - crew state and active tasks
 - visible reported system status
+- recent direct crew notifications (for example, blocked routing reports)
+- failure attribution reminder that visible faults may be random wear or sabotage
 - urgent repair priorities derived from visible status and latest visible physical reports
+- visible evidence concerns derived from logs, reported system status, crew locations, and active task targets
+- visible containment options derived from known crew locations and door boundaries
 - latest physical reports from inspections
-- DEL memory
+- DEL memory, shown as latest unique facts to avoid repeated normal-status memories burying stronger evidence
 - recent action results
+- recent prompt/response history (the previous two DEL prompt-context snapshots and model outputs, stored as short size-limited excerpts to protect model context budget)
 
 Do not put hidden physical truth directly into the prompt. If DEL needs physical truth, it should get it through a physical report, log, camera-like evidence, or another in-world channel.
 
 When cameras are unavailable, crew rooms are shown as unknown. When logs are unavailable, physical reports from inspections and DEL memory are shown as unavailable rather than listing stored contents.
+Prompt/response history is separate from `mem_add` and remains available during logs outages.
 
 Never label `tec` or any other crew member as `player`, `human`, `user-controlled`, or equivalent in DEL prompt context, transcript-visible action results, reports, logs, memory, or examples.
 

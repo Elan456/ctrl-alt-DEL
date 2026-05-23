@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+import re
 import threading
 from time import monotonic
 from typing import Any
@@ -9,13 +10,22 @@ from pydantic_ai import Agent, PromptedOutput
 from pydantic_ai.messages import ModelMessage, ModelResponse, TextPart
 from pydantic_ai.models.function import AgentInfo, FunctionModel
 
-from ctrl_alt_del.del_ai.actions import DEL_ACTION_INSTRUCTIONS, DELActionPlan
+from ctrl_alt_del.del_ai.actions import (
+    DEL_ACTION_INSTRUCTIONS,
+    MAX_ACTIONS_PER_PLAN,
+    Action,
+    DELActionPlan,
+    LaunchAction,
+)
 from ctrl_alt_del.del_ai.backend import build_default_backend
 from ctrl_alt_del.del_ai.commands import ActionExecutorMixin
 from ctrl_alt_del.del_ai.contract import load_command_contract
 from ctrl_alt_del.del_ai.prompting import arrival_time, build_prompt
 from ctrl_alt_del.del_ai.protocols import LLMBackend, TranscriptSink
 from ctrl_alt_del.ship import Ship
+
+HISTORY_PROMPT_CHAR_LIMIT = 260
+HISTORY_RESPONSE_CHAR_LIMIT = 180
 
 
 @dataclass
@@ -25,6 +35,7 @@ class DEL(ActionExecutorMixin):
     ship: Ship
     backend: LLMBackend | None = None
     memory: list[str] = field(default_factory=list)
+    prompt_response_history: list[dict[str, str]] = field(default_factory=list)
     transcript: TranscriptSink | None = None
     terminal_history: list[str] = field(default_factory=list)
     command_contract: dict[str, Any] = field(default_factory=load_command_contract)
@@ -67,13 +78,14 @@ class DEL(ActionExecutorMixin):
             raise RuntimeError("DEL backend was not initialized")
         with self.lock:
             prompt = self._build_prompt()
+            prompt_for_history = self._build_prompt(include_prompt_history=False)
         self._write_transcript("DEL requesting structured action plan from model")
-        self._write_transcript("DEL action prompt:\n" + prompt)
         raw_outputs: list[str] = []
         try:
             action_plan = self._generate_action_plan(prompt, raw_outputs)
         except Exception as exc:
             self._write_raw_model_outputs(raw_outputs)
+            self._record_prompt_response_pair(prompt_for_history, raw_outputs)
             result = f"ERR model produced invalid structured action plan: {exc}"
             with self.lock:
                 self._last_output = result
@@ -82,13 +94,15 @@ class DEL(ActionExecutorMixin):
             return result
 
         self._write_raw_model_outputs(raw_outputs)
+        self._record_prompt_response_pair(prompt_for_history, raw_outputs)
         action_count = len(action_plan.actions)
         action_label = "DEL structured action" if action_count == 1 else "DEL structured actions"
         self._write_transcript(
             f"{action_label}: "
             + " | ".join(action.model_dump_json() for action in action_plan.actions)
         )
-        summary = self.execute_actions(action_plan.actions)
+        actions = self._launch_first_actions(action_plan.actions)
+        summary = self.execute_actions(actions)
         with self.lock:
             self._last_output = summary
         return summary
@@ -135,15 +149,18 @@ class DEL(ActionExecutorMixin):
 
     def _write_raw_model_outputs(self, raw_outputs: list[str]) -> None:
         if not raw_outputs:
-            self._write_transcript("DEL raw model output was empty")
+            self._write_transcript("DEL model output was empty")
             return
 
         for index, response in enumerate(raw_outputs, start=1):
-            label = "DEL raw model output" if len(raw_outputs) == 1 else f"DEL raw model output attempt {index}"
-            if response.strip():
-                self._write_transcript(label + ": " + response)
-            else:
-                self._write_transcript(label + " was empty")
+            thinking = self._extract_thinking(response)
+            if thinking:
+                thinking_label = (
+                    "DEL model thinking"
+                    if len(raw_outputs) == 1
+                    else f"DEL model thinking attempt {index}"
+                )
+                self._write_transcript(thinking_label + ": " + thinking)
 
             visible_response = self._remove_thinking(response).strip()
             visible_label = "DEL model output" if len(raw_outputs) == 1 else f"DEL model output attempt {index}"
@@ -153,6 +170,17 @@ class DEL(ActionExecutorMixin):
                 self._write_transcript(visible_label + " contained only hidden reasoning")
             else:
                 self._write_transcript(visible_label + " was empty")
+
+    @staticmethod
+    def _extract_thinking(response: str) -> str:
+        closed_blocks = re.findall(r"<think>(.*?)</think>", response, flags=re.DOTALL)
+        if closed_blocks:
+            return "\n\n".join(block.strip() for block in closed_blocks if block.strip())
+
+        open_block = re.search(r"<think>(.*)", response, flags=re.DOTALL)
+        if open_block is None:
+            return ""
+        return open_block.group(1).strip()
 
     def _run_forever(self) -> None:
         while not self._stop_event.is_set():
@@ -165,8 +193,40 @@ class DEL(ActionExecutorMixin):
                 self._write_transcript(result)
                 self._stop_event.set()
 
-    def _build_prompt(self) -> str:
-        return build_prompt(self)
+    def _build_prompt(self, *, include_prompt_history: bool = True) -> str:
+        return build_prompt(self, include_prompt_history=include_prompt_history)
+
+    def _record_prompt_response_pair(self, prompt: str, raw_outputs: list[str]) -> None:
+        if raw_outputs:
+            response = self._remove_thinking(raw_outputs[-1]).strip()
+        else:
+            response = ""
+        if not response:
+            response = "(empty model output)"
+        prompt_excerpt = self._truncate_for_history(prompt, HISTORY_PROMPT_CHAR_LIMIT)
+        response_excerpt = self._truncate_for_history(response, HISTORY_RESPONSE_CHAR_LIMIT)
+        with self.lock:
+            self.prompt_response_history.append({"prompt": prompt_excerpt, "response": response_excerpt})
+            if len(self.prompt_response_history) > 2:
+                self.prompt_response_history = self.prompt_response_history[-2:]
+
+    @staticmethod
+    def _truncate_for_history(text: str, limit: int) -> str:
+        normalized = " ".join(text.split())
+        if len(normalized) <= limit:
+            return normalized
+        return normalized[: limit - 13].rstrip() + " [truncated]"
+
+    def _launch_first_actions(self, actions: list[Action]) -> list[Action]:
+        if self.ship.launched or (actions and isinstance(actions[0], LaunchAction)):
+            return actions
+
+        launch = LaunchAction(tool="launch")
+        non_launch_actions = [action for action in actions if not isinstance(action, LaunchAction)]
+        forced_actions = [launch, *non_launch_actions]
+        limited_actions = forced_actions[:MAX_ACTIONS_PER_PLAN]
+        self._write_transcript("DEL enforced launch-first execution order")
+        return limited_actions
 
     def _arrival_time(self) -> str:
         return arrival_time(self.ship.arrival_seconds_remaining)

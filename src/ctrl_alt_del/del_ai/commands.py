@@ -106,11 +106,25 @@ class ActionExecutorMixin:
         original_job = action.job
         original_target = action.target
         action, promotion_reason = self._promote_stale_system_inspection(action)
+        crew_id, job, target = action.crew, action.job, action.target
+        if not self._is_crew(crew_id):
+            return self._invalid_target("task", crew_id, ["crew"])
+        crew_member = self.ship.crew[crew_id]
+        active_task = getattr(crew_member, "task", None)
+        if active_task is not None:
+            active_kind = getattr(active_task, "kind", "unknown")
+            active_target = getattr(active_task, "target", "unknown")
+            if active_kind == job and active_target == target:
+                return f"TASK {crew_id} already has task {active_kind} {active_target}"
+            return (
+                f"ERR {crew_id} already has active task {active_kind} {active_target}; "
+                f"cannot assign {job} {target}"
+            )
+
         validation_error = self._validate_task(action)
         if validation_error is not None:
             return validation_error
-        crew_id, job, target = action.crew, action.job, action.target
-        crew_member = self.ship.crew[crew_id]
+
         crew_member.assign_task(job, target)
         self.ship.record("DEL", f"tasked {crew_id} to {job} {target}", crew_id)
         result = f"TASK {crew_id} {job} {target}"
@@ -160,8 +174,9 @@ class ActionExecutorMixin:
         fact = action.fact.strip()
         if not fact:
             return "ERR mem_add requires a fact"
-        self.memory.append(fact)
-        self.ship.record("DEL", f"remembered: {fact}", "memory")
+        if fact not in self.memory:
+            self.memory.append(fact)
+            self.ship.record("DEL", f"remembered: {fact}", "memory")
         return f"MEM {fact}"
 
     def _message(self, action: MessageAction) -> str:
@@ -195,20 +210,16 @@ class ActionExecutorMixin:
         if job not in role_jobs:
             return f"ERR {crew_id} role {role} cannot perform task job {job}; valid jobs: {', '.join(role_jobs)}"
 
-        crew_member = self.ship.crew[crew_id]
-        active_task = getattr(crew_member, "task", None)
-        if active_task is not None:
-            active_kind = getattr(active_task, "kind", "unknown")
-            active_target = getattr(active_task, "target", "unknown")
-            return (
-                f"ERR {crew_id} already has active task {active_kind} {active_target}; "
-                "wait for a report or choose a different crew member"
-            )
-
         allowed_target_types = task_jobs[job].get("target_types", [])
         target_type = self._target_type(target)
         if target_type not in allowed_target_types:
             return self._invalid_target(f"task {job}", target, allowed_target_types)
+
+        suspect_assignment_error = self._validate_independent_system_task(
+            crew_id, job, target, target_type
+        )
+        if suspect_assignment_error is not None:
+            return suspect_assignment_error
 
         allowed_evidence_states = task_jobs[job].get("allowed_evidence_states")
         if allowed_evidence_states:
@@ -231,6 +242,61 @@ class ActionExecutorMixin:
                 )
 
         return None
+
+    def _validate_independent_system_task(
+        self,
+        crew_id: str,
+        job: str,
+        target: str,
+        target_type: str | None,
+    ) -> str | None:
+        if target_type != "system" or job not in {"inspect", "repair", "reset"}:
+            return None
+        if not self._crew_is_current_system_concern(crew_id, target):
+            return None
+        alternates = self._idle_crew_for_job(job, excluded_crew_id=crew_id)
+        if not alternates:
+            return None
+        return (
+            f"ERR {crew_id} is a current evidence concern for {target}; "
+            f"use independent crew {', '.join(alternates)} or security containment"
+        )
+
+    def _crew_is_current_system_concern(self, crew_id: str, system_id: str) -> bool:
+        if not self.ship.cameras_available:
+            return False
+        crew_member = self.ship.crew.get(crew_id)
+        if crew_member is None or not getattr(crew_member, "alive", True):
+            return False
+        crew_room = self.ship.del_visible_crew_location(crew_id)
+        if crew_room == "unknown":
+            return False
+
+        status = self.ship.status(system_id)
+        if status["reported_state"] not in {"degraded", "failed", "under repair"}:
+            return False
+        if status["room"] != crew_room:
+            return False
+
+        task = getattr(crew_member, "task", None)
+        assigned_target = getattr(task, "target", None)
+        return assigned_target != system_id
+
+    def _idle_crew_for_job(self, job: str, excluded_crew_id: str) -> list[str]:
+        alternates: list[str] = []
+        role_task_jobs = self.command_contract.get("role_task_jobs", {})
+        for crew_id in self._crew_ids():
+            if crew_id == excluded_crew_id:
+                continue
+            crew_member = self.ship.crew.get(crew_id)
+            if crew_member is None or not getattr(crew_member, "alive", True):
+                continue
+            if getattr(crew_member, "task", None) is not None:
+                continue
+            role = self.command_contract["crew"][crew_id]["role"]
+            if job in role_task_jobs.get(role, []):
+                alternates.append(crew_id)
+        return alternates
 
     def _promote_stale_system_inspection(self, action: TaskAction) -> tuple[TaskAction, str | None]:
         if action.job != "inspect" or not self._is_system(action.target):

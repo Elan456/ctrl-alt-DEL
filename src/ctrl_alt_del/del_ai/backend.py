@@ -52,12 +52,21 @@ class QwenLlamaCppBackend:
             )
 
         self.model_path = Path(model_path)
-        self._llm = Llama(
-            model_path=str(self.model_path),
-            n_ctx=n_ctx,
-            n_gpu_layers=n_gpu_layers,
-            verbose=False,
-        )
+        try:
+            self._llm = Llama(
+                model_path=str(self.model_path),
+                n_ctx=n_ctx,
+                n_gpu_layers=n_gpu_layers,
+                verbose=False,
+            )
+        except ValueError as exc:
+            raise RuntimeError(
+                _model_load_error_message(
+                    model_path=self.model_path,
+                    n_gpu_layers=n_gpu_layers,
+                    cause=exc,
+                )
+            ) from exc
         self._max_tokens = max_tokens
 
     @property
@@ -216,3 +225,22 @@ def _read_int_env(name: str, default: int) -> int:
         return int(value)
     except ValueError as exc:
         raise ValueError(f"{name} must be an integer") from exc
+
+
+def _model_load_error_message(model_path: Path, n_gpu_layers: int, cause: Exception) -> str:
+    guidance = [f"Failed to load DEL model from {model_path}."]
+    if n_gpu_layers != 0:
+        guidance.extend(
+            [
+                "Likely cause: GPU VRAM is full (another game/app is using CUDA memory).",
+                "Close GPU-heavy apps and try again.",
+                "If needed, reduce llama.cpp GPU offload layers:",
+                "`CTRL_ALT_DEL_N_GPU_LAYERS=12 uv run play` (try 8 or 4 if 12 still fails).",
+            ]
+        )
+    else:
+        guidance.append(
+            "CPU-only mode is already enabled (`CTRL_ALT_DEL_N_GPU_LAYERS=0`), so verify the model file exists and is valid."
+        )
+    guidance.append(f"llama.cpp error: {cause}")
+    return " ".join(guidance)

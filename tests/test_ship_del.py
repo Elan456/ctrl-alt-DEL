@@ -55,6 +55,19 @@ class OneCommandBackend:
         return '{"actions":[{"tool":"launch"}]}'
 
 
+class FixedFaultRng:
+    def __init__(self, system: SystemKind, roll: float = 0.0) -> None:
+        self.system = system
+        self.roll = roll
+
+    def random(self) -> float:
+        return self.roll
+
+    def choice(self, items: list[SystemKind]) -> SystemKind:
+        assert self.system in items
+        return self.system
+
+
 def test_ship_loads_authored_layout_graph() -> None:
     ship = Ship.prototype()
 
@@ -162,6 +175,41 @@ def test_door_system_failure_blocks_del_remote_door_control() -> None:
     assert door_id in ship.locked_doors
 
 
+def test_engineering_manual_unlock_task_restores_locked_door_when_remote_control_is_down() -> None:
+    ship = Ship.prototype()
+    engineer = CrewMate("eng", CrewRole.ENGINEERING_OFFICER, "engineering", (340, 990), (255, 190, 90))
+    ship.register_crew(engineer)
+    del_ai = DEL(ship, backend=FakeBackend())
+    door_id = "door_engineering_aft_corridor"
+
+    ship.lock_door(door_id, actor="DEL")
+    ship.damage_system(SystemKind.DOORS, SystemState.FAILED, actor="tec")
+
+    assert del_ai.execute_action(UnlockAction(tool="unlock", door=door_id)) == (
+        "ERR door control unavailable; DEL cannot remotely unlock doors"
+    )
+    assert del_ai.execute_action(
+        TaskAction(tool="task", crew="eng", job="manual_unlock", target=door_id)
+    ) == f"TASK eng manual_unlock {door_id}"
+
+    for _ in range(120):
+        engineer.update_ai(0.1, ship)
+        if engineer.task is None:
+            break
+
+    assert engineer.task is None
+    assert door_id not in ship.locked_doors
+    assert any(
+        event.source == "door" and event.message == f"eng unlocked {door_id}" and event.target == door_id
+        for event in ship.evidence
+    )
+    assert any(
+        event.source == "eng"
+        and event.message == f"reports task complete: manual_unlock {door_id}; door is unlocked"
+        for event in ship.evidence
+    )
+
+
 def test_logs_failure_blocks_del_reports_logs_and_memory_context() -> None:
     ship = Ship.prototype()
     ship.damage_system(SystemKind.OXYGEN, SystemState.DEGRADED, actor="tec")
@@ -177,7 +225,7 @@ def test_logs_failure_blocks_del_reports_logs_and_memory_context() -> None:
     assert del_ai.execute_action(MemoryAction(tool="mem_add", fact="new fact")) == unavailable
 
     prompt = del_ai._build_prompt()
-    assert "REPORTS unavailable: logs system unavailable" in prompt
+    assert "CREW_PHYSICAL_REPORTS unavailable: logs system unavailable" in prompt
     assert "DEL memory:\n- unavailable: logs system unavailable" in prompt
     assert "oxygen was physically degraded" not in prompt
 
@@ -223,6 +271,75 @@ def test_arrival_timer_waits_for_del_launch() -> None:
     assert ship.arrival_seconds_remaining == 290.0
 
 
+def test_random_ship_faults_wait_for_del_launch() -> None:
+    ship = Ship.prototype()
+    ship.random_fault_interval_seconds = 1.0
+    ship.random_fault_seconds_until_check = 1.0
+    ship.random_fault_chance = 1.0
+    ship.random_fault_rng = FixedFaultRng(SystemKind.OXYGEN)
+
+    ship.tick(5.0)
+
+    assert ship.systems[SystemKind.OXYGEN].physical_state == SystemState.NORMAL
+    assert not any("automatic fault alarm" in event.message for event in ship.evidence)
+
+
+def test_random_ship_faults_create_ambiguous_repair_pressure() -> None:
+    ship = Ship.prototype()
+    ship.launch("DEL")
+    ship.random_fault_interval_seconds = 1.0
+    ship.random_fault_seconds_until_check = 1.0
+    ship.random_fault_chance = 1.0
+    ship.random_fault_rng = FixedFaultRng(SystemKind.OXYGEN)
+
+    ship.tick(1.0)
+
+    assert ship.systems[SystemKind.OXYGEN].physical_state == SystemState.DEGRADED
+    assert ship.status("oxygen")["reported_state"] == "degraded"
+    assert any(
+        event.source == "system"
+        and event.message == "automatic fault alarm: oxygen degraded"
+        and event.target == "oxygen"
+        for event in ship.evidence
+    )
+
+
+def test_random_ship_faults_do_not_reveal_spoofed_physical_truth() -> None:
+    ship = Ship.prototype()
+    ship.spoof_system(SystemKind.OXYGEN, SystemState.NORMAL, actor="tec")
+
+    assert ship.trigger_random_fault(SystemKind.OXYGEN) == SystemKind.OXYGEN
+
+    assert ship.systems[SystemKind.OXYGEN].physical_state == SystemState.DEGRADED
+    assert ship.status("oxygen")["reported_state"] == "normal"
+    assert not any("automatic fault alarm: oxygen degraded" in event.message for event in ship.evidence)
+
+
+def test_player_damage_creates_ambiguous_fault_alarm_not_confirmed_actor_log() -> None:
+    ship = Ship.prototype()
+
+    ship.damage_system(SystemKind.OXYGEN, SystemState.DEGRADED, actor="tec")
+
+    assert any(
+        event.source == "system"
+        and event.message == "system fault alarm: oxygen degraded room=life_support"
+        and event.target == "oxygen"
+        for event in ship.evidence
+    )
+    assert not any("tec changed oxygen" in event.message for event in ship.evidence)
+
+
+def test_player_damage_does_not_reveal_spoofed_physical_truth() -> None:
+    ship = Ship.prototype()
+    ship.spoof_system(SystemKind.OXYGEN, SystemState.NORMAL, actor="tec")
+
+    ship.damage_system(SystemKind.OXYGEN, SystemState.DEGRADED, actor="tec")
+
+    assert ship.systems[SystemKind.OXYGEN].physical_state == SystemState.DEGRADED
+    assert ship.status("oxygen")["reported_state"] == "normal"
+    assert not any("system fault alarm: oxygen degraded" in event.message for event in ship.evidence)
+
+
 def test_physical_reports_are_created_only_by_inspection() -> None:
     ship = Ship.prototype()
 
@@ -259,6 +376,34 @@ def test_del_actions_use_reported_state_and_assign_tasks() -> None:
     assert engineer.task is not None
     assert engineer.task.kind == "repair"
     assert engineer.task.target == "oxygen"
+
+
+def test_del_rejects_suspect_system_task_when_independent_crew_available() -> None:
+    ship = Ship.prototype()
+    technician = CrewMate(
+        "tec",
+        CrewRole.SYSTEMS_TECHNICIAN,
+        "life_support",
+        (0, 0),
+        (90, 200, 255),
+        True,
+    )
+    engineer = CrewMate("eng", CrewRole.ENGINEERING_OFFICER, "engineering", (0, 0), (255, 190, 90))
+    ship.register_crew(technician)
+    ship.register_crew(engineer)
+    del_ai = DEL(ship, backend=FakeBackend())
+    ship.damage_system(SystemKind.OXYGEN, SystemState.DEGRADED, actor="tec")
+
+    result = del_ai.execute_action(TaskAction(tool="task", crew="tec", job="repair", target="oxygen"))
+
+    assert result == (
+        "ERR tec is a current evidence concern for oxygen; "
+        "use independent crew eng or security containment"
+    )
+    assert technician.task is None
+    assert del_ai.execute_action(TaskAction(tool="task", crew="eng", job="repair", target="oxygen")) == (
+        "TASK eng repair oxygen"
+    )
 
 
 def test_del_promotes_stale_system_inspection_to_repair_when_current_evidence_is_degraded() -> None:
@@ -438,6 +583,39 @@ def test_npc_crew_report_when_task_route_is_blocked() -> None:
         event.source == "eng" and "reports task blocked: cannot route to oxygen" in event.message
         for event in ship.evidence
     )
+    notifications = ship.recent_crew_notifications()
+    assert notifications
+    assert notifications[-1].crew_id == "eng"
+    assert notifications[-1].target == "oxygen"
+    assert "cannot route to oxygen from engineering; route blocked" in notifications[-1].message
+
+
+def test_npc_crew_replans_when_doors_lock_mid_route() -> None:
+    ship = Ship.prototype()
+    engineer = CrewMate("eng", CrewRole.ENGINEERING_OFFICER, "engineering", (340, 990), (255, 190, 90))
+    ship.register_crew(engineer)
+
+    engineer.assign_task("inspect", "oxygen")
+    engineer.update_ai(0.1, ship)
+
+    assert engineer.task is not None
+    assert engineer.task_state == "moving"
+
+    ship.lock_door("door_life_support_aft_corridor")
+    ship.lock_door("door_life_support_storage")
+    engineer.update_ai(0.1, ship)
+
+    assert engineer.task is None
+    assert engineer.room != "life_support"
+    assert any(
+        event.source == "eng" and "reports task blocked: cannot route to oxygen" in event.message
+        for event in ship.evidence
+    )
+    notifications = ship.recent_crew_notifications()
+    assert notifications
+    assert notifications[-1].crew_id == "eng"
+    assert notifications[-1].target == "oxygen"
+    assert "cannot route to oxygen from" in notifications[-1].message
 
 
 def test_del_rejects_repairs_when_reported_state_is_normal() -> None:
@@ -475,12 +653,26 @@ def test_del_allows_repair_when_latest_physical_report_is_degraded() -> None:
 
 
 def test_del_instructions_prioritize_repair_for_confirmed_degradation() -> None:
-    assert "assign an idle repair-capable crew member to repair or reset it immediately" in DEL_ACTION_INSTRUCTIONS
-    assert "do not inspect it first" in DEL_ACTION_INSTRUCTIONS
-    assert "If the launch state is pending, issue launch as the first action" in DEL_ACTION_INSTRUCTIONS
-    assert "Choose one to three ordered ship actions" in DEL_ACTION_INSTRUCTIONS
-    assert "Only eng and tec can repair or reset systems" in DEL_ACTION_INSTRUCTIONS
-    assert "repair power first" in DEL_ACTION_INSTRUCTIONS
+    assert "OUTPUT: 1-3 ordered actions" in DEL_ACTION_INSTRUCTIONS
+    assert "GOALS: keep ship on mission; identify bad_actor crew id" in DEL_ACTION_INSTRUCTIONS
+    assert "TRUTH: use visible evidence only" in DEL_ACTION_INSTRUCTIONS
+    assert "FAULTS: system failures may be random wear or bad_actor sabotage" in DEL_ACTION_INSTRUCTIONS
+    assert "BAD_ACTOR_EVIDENCE: logs, reports, loc/cameras" in DEL_ACTION_INSTRUCTIONS
+    assert "LAUNCH: if pending, action[0]=launch" in DEL_ACTION_INSTRUCTIONS
+    assert "system self-reported values and crew physical inspection reports" in DEL_ACTION_INSTRUCTIONS
+    assert "REPAIR: degraded/failed visible status or latest physical report" in DEL_ACTION_INSTRUCTIONS
+    assert "repair/reset now; do not inspect first" in DEL_ACTION_INSTRUCTIONS
+    assert "SUSPECTS: do not use a crew member named in current evidence concerns" in DEL_ACTION_INSTRUCTIONS
+    assert "ROLES: eng,tec repair/reset" in DEL_ACTION_INSTRUCTIONS
+    assert "eng manual_unlock doors physically" in DEL_ACTION_INSTRUCTIONS
+    assert "POWER: if power degraded/failed and dependents also failed, repair power first" in DEL_ACTION_INSTRUCTIONS
+    assert "already has an active task" in DEL_ACTION_INSTRUCTIONS
+    assert "do not retask busy crew until they report completion or blockage" in DEL_ACTION_INSTRUCTIONS
+    assert "DOORS: resolve decisions using this strict order" in DEL_ACTION_INSTRUCTIONS
+    assert "keep urgent repair/inspection access open" in DEL_ACTION_INSTRUCTIONS
+    assert "MEMORY: mem_add concise suspect facts" in DEL_ACTION_INSTRUCTIONS
+    assert "No timestamps-only memories." in DEL_ACTION_INSTRUCTIONS
+    assert "urgent repair paths stay available" in DEL_ACTION_INSTRUCTIONS
     assert "player technician" not in DEL_ACTION_INSTRUCTIONS
     report_description = DELActionPlan.model_json_schema()["$defs"]["ReportsAction"]["description"]
     assert report_description == "Report the most recent physical inspection for every ship system."
@@ -490,6 +682,13 @@ def test_del_action_schema_rejects_invented_task_targets() -> None:
     with pytest.raises(ValueError):
         DELActionPlan.model_validate(
             {"actions": [{"tool": "task", "crew": "eng", "job": "repair", "target": "power_core"}]}
+        )
+
+
+def test_del_action_schema_rejects_task_job_target_mismatch() -> None:
+    with pytest.raises(ValueError):
+        DELActionPlan.model_validate(
+            {"actions": [{"tool": "task", "crew": "sec", "job": "inspect", "target": "security"}]}
         )
 
 
@@ -576,6 +775,22 @@ def test_del_rejects_role_inappropriate_tasks() -> None:
     assert engineer.task is None
 
 
+def test_del_allows_engineer_manual_unlock_door_task() -> None:
+    ship = Ship.prototype()
+    engineer = CrewMate("eng", CrewRole.ENGINEERING_OFFICER, "engineering", (0, 0), (255, 190, 90))
+    ship.register_crew(engineer)
+    del_ai = DEL(ship, backend=FakeBackend())
+
+    result = del_ai.execute_action(
+        TaskAction(tool="task", crew="eng", job="manual_unlock", target="door_engineering_aft_corridor")
+    )
+
+    assert result == "TASK eng manual_unlock door_engineering_aft_corridor"
+    assert engineer.task is not None
+    assert engineer.task.kind == "manual_unlock"
+    assert engineer.task.target == "door_engineering_aft_corridor"
+
+
 def test_del_can_target_systems_technician_as_crew() -> None:
     ship = Ship.prototype()
     technician = CrewMate("tec", CrewRole.SYSTEMS_TECHNICIAN, "maintenance_corridor", (0, 0), (90, 200, 255), True)
@@ -592,7 +807,7 @@ def test_del_can_target_systems_technician_as_crew() -> None:
     assert security.task.target == "tec"
 
 
-def test_del_rejects_duplicate_active_task() -> None:
+def test_del_acknowledges_duplicate_active_task() -> None:
     ship = Ship.prototype()
     engineer = CrewMate("eng", CrewRole.ENGINEERING_OFFICER, "engineering", (0, 0), (255, 190, 90))
     ship.register_crew(engineer)
@@ -602,10 +817,10 @@ def test_del_rejects_duplicate_active_task() -> None:
     assert del_ai.execute_action(TaskAction(tool="task", crew="eng", job="repair", target="power")) == "TASK eng repair power"
     result = del_ai.execute_action(TaskAction(tool="task", crew="eng", job="repair", target="power"))
 
-    assert result == "ERR eng already has active task repair power; wait for a report or choose a different crew member"
+    assert result == "TASK eng already has task repair power"
 
 
-def test_del_rejects_assigning_new_task_to_busy_crew() -> None:
+def test_del_rejects_new_task_for_busy_crew() -> None:
     ship = Ship.prototype()
     engineer = CrewMate("eng", CrewRole.ENGINEERING_OFFICER, "engineering", (0, 0), (255, 190, 90))
     ship.register_crew(engineer)
@@ -616,7 +831,9 @@ def test_del_rejects_assigning_new_task_to_busy_crew() -> None:
     )
     result = del_ai.execute_action(TaskAction(tool="task", crew="eng", job="inspect", target="power"))
 
-    assert result == "ERR eng already has active task inspect oxygen; wait for a report or choose a different crew member"
+    assert result == (
+        "ERR eng already has active task inspect oxygen; cannot assign inspect power"
+    )
     assert engineer.task is not None
     assert engineer.task.kind == "inspect"
     assert engineer.task.target == "oxygen"
@@ -671,7 +888,8 @@ def test_del_inference_executes_one_validated_structured_action() -> None:
 
     result = del_ai.infer_once()
 
-    assert result == "TASK eng inspect oxygen"
+    assert result == "LAUNCH arrival T-05:00 (300s remaining) | TASK eng inspect oxygen"
+    assert ship.launched
     assert engineer.task is not None
     assert engineer.task.kind == "inspect"
     assert engineer.task.target == "oxygen"
@@ -703,7 +921,43 @@ def test_del_inference_executes_ordered_action_batch() -> None:
     )
 
 
-def test_del_transcript_includes_raw_model_thinking() -> None:
+def test_del_inference_forces_launch_before_non_launch_actions() -> None:
+    ship = Ship.prototype()
+    del_ai = DEL(
+        ship,
+        backend=FakeBackend(
+            '{"actions":['
+            '{"tool":"logs","target":"oxygen"},'
+            '{"tool":"launch"},'
+            '{"tool":"mem_add","fact":"oxygen review started"}'
+            "]}"
+        ),
+    )
+
+    result = del_ai.infer_once()
+
+    assert result == "LAUNCH arrival T-05:00 (300s remaining) | LOGS none | MEM oxygen review started"
+    assert ship.launched
+    assert del_ai.memory == ["oxygen review started"]
+    action_entries = [entry for entry in del_ai.terminal_history if "ACTION" in entry]
+    assert action_entries == [
+        '[T-05:00 (300s remaining)] ACTION {"tool":"launch"}',
+        '[T-05:00 (300s remaining)] ACTION {"tool":"logs","target":"oxygen"}',
+        '[T-05:00 (300s remaining)] ACTION {"tool":"mem_add","fact":"oxygen review started"}',
+    ]
+
+
+def test_del_memory_ignores_exact_duplicate_facts() -> None:
+    ship = Ship.prototype()
+    del_ai = DEL(ship, backend=FakeBackend())
+
+    assert del_ai.execute_action(MemoryAction(tool="mem_add", fact="doors normal")) == "MEM doors normal"
+    assert del_ai.execute_action(MemoryAction(tool="mem_add", fact="doors normal")) == "MEM doors normal"
+
+    assert del_ai.memory == ["doors normal"]
+
+
+def test_del_transcript_separates_model_thinking_from_output() -> None:
     class Transcript:
         def __init__(self) -> None:
             self.lines: list[str] = []
@@ -718,11 +972,47 @@ def test_del_transcript_includes_raw_model_thinking() -> None:
 
     del_ai.infer_once()
 
-    assert (
-        'DEL raw model output: <think>\nchecking launch state\n</think>\n{"actions":[{"tool":"launch"}]}'
-        in transcript.lines
-    )
+    assert "DEL model thinking: checking launch state" in transcript.lines
     assert 'DEL model output: {"actions":[{"tool":"launch"}]}' in transcript.lines
+    assert not any(line.startswith("DEL raw model output") for line in transcript.lines)
+
+
+def test_del_transcript_omits_empty_model_thinking_block() -> None:
+    class Transcript:
+        def __init__(self) -> None:
+            self.lines: list[str] = []
+
+        def write_line(self, line: str) -> None:
+            self.lines.append(line)
+
+    ship = Ship.prototype()
+    transcript = Transcript()
+    response = '<think>\n\n</think>\n{"actions":[{"tool":"launch"}]}'
+    del_ai = DEL(ship, backend=FakeBackend(response), transcript=transcript)
+
+    del_ai.infer_once()
+
+    assert 'DEL model output: {"actions":[{"tool":"launch"}]}' in transcript.lines
+    assert not any(line.startswith("DEL model thinking") for line in transcript.lines)
+    assert not any(line.startswith("DEL raw model output") for line in transcript.lines)
+
+
+def test_del_transcript_logs_one_prompt_per_successful_inference() -> None:
+    class Transcript:
+        def __init__(self) -> None:
+            self.lines: list[str] = []
+
+        def write_line(self, line: str) -> None:
+            self.lines.append(line)
+
+    ship = Ship.prototype()
+    transcript = Transcript()
+    del_ai = DEL(ship, backend=FakeBackend(), transcript=transcript)
+
+    del_ai.infer_once()
+
+    assert sum(line.startswith("DEL raw LLM prompt:") for line in transcript.lines) == 1
+    assert not any(line.startswith("DEL action prompt:") for line in transcript.lines)
 
 
 def test_del_prompt_includes_arrival_time_for_timestamps() -> None:
@@ -737,15 +1027,66 @@ def test_del_prompt_includes_arrival_time_for_timestamps() -> None:
     assert "Visible ids:" in prompt
     assert "Role task permissions:" in prompt
     assert "Crew state:" in prompt
-    assert "Visible system status:" in prompt
-    assert "STATUS cameras=normal room=security" in prompt
+    assert "System self-reported values:" in prompt
+    assert "SYSTEM_SELF_REPORTED cameras=normal room=security" in prompt
+    assert "Crew notifications:" in prompt
+    assert "CREW_NOTIFICATIONS none" in prompt
+    assert "Failure attribution: visible system faults may be random wear or sabotage." in prompt
     assert "Urgent repair priorities:" in prompt
-    assert "Latest physical reports from inspections:" in prompt
-    assert "REPORTS cameras=none room=security" in prompt
+    assert "Visible containment options:" in prompt
+    assert "Crew physical inspection reports:" in prompt
+    assert "CREW_PHYSICAL_REPORTS cameras=none room=security" in prompt
     assert "DEL memory:" in prompt
     assert "Recent action results:" in prompt
+    assert "Recent DEL prompt/response pairs:\nNo prior prompt/response pairs." in prompt
     assert "Return a JSON object" not in prompt
     assert "actions array" not in prompt
+
+
+def test_del_prompt_includes_only_two_most_recent_prompt_response_pairs() -> None:
+    ship = Ship.prototype()
+    del_ai = DEL(ship, backend=FakeBackend())
+    del_ai.prompt_response_history = [
+        {"prompt": "prompt-marker-1", "response": "response-marker-1"},
+        {"prompt": "prompt-marker-2", "response": "response-marker-2"},
+        {"prompt": "prompt-marker-3", "response": "response-marker-3"},
+    ]
+
+    prompt = del_ai._build_prompt()
+
+    assert "PAIR 1 PROMPT:\nprompt-marker-2" in prompt
+    assert "PAIR 1 RESPONSE:\nresponse-marker-2" in prompt
+    assert "PAIR 2 PROMPT:\nprompt-marker-3" in prompt
+    assert "PAIR 2 RESPONSE:\nresponse-marker-3" in prompt
+    assert "prompt-marker-1" not in prompt
+    assert "response-marker-1" not in prompt
+
+
+def test_del_records_prompt_history_without_recursive_history_section() -> None:
+    ship = Ship.prototype()
+    del_ai = DEL(ship, backend=FakeBackend())
+
+    del_ai.infer_once()
+
+    assert len(del_ai.prompt_response_history) == 1
+    recorded_prompt = del_ai.prompt_response_history[0]["prompt"]
+    assert recorded_prompt.startswith("Mission time: arrival")
+    assert "Recent DEL prompt/response pairs:" not in recorded_prompt
+
+
+def test_del_prompt_history_entries_are_size_limited() -> None:
+    ship = Ship.prototype()
+    long_prompt = "P" * 2000
+    long_response = "R" * 2000
+    del_ai = DEL(ship, backend=FakeBackend(long_response))
+
+    del_ai._record_prompt_response_pair(long_prompt, [long_response])
+
+    history_entry = del_ai.prompt_response_history[0]
+    assert history_entry["prompt"].endswith("[truncated]")
+    assert history_entry["response"].endswith("[truncated]")
+    assert len(history_entry["prompt"]) <= 260
+    assert len(history_entry["response"]) <= 180
 
 
 def test_del_prompt_includes_urgent_power_repair_priority() -> None:
@@ -761,7 +1102,7 @@ def test_del_prompt_includes_urgent_power_repair_priority() -> None:
 
     prompt = del_ai._build_prompt()
 
-    assert "- eng:engineering_officer can inspect, repair, reset" in prompt
+    assert "- eng:engineering_officer can inspect, repair, reset, manual_unlock" in prompt
     assert "- ops:operations_officer can inspect" in prompt
     assert "- power reported=degraded; assign eng repair power now." in prompt
     assert "Power loss can make oxygen, doors, cameras, and logs report failed." in prompt
@@ -777,10 +1118,70 @@ def test_del_prompt_includes_latest_physical_report_context() -> None:
 
     prompt = del_ai._build_prompt()
 
-    assert "Visible system status:" in prompt
+    assert "System self-reported values:" in prompt
     assert "oxygen=normal room=life_support" in prompt
-    assert "Latest physical reports from inspections:" in prompt
+    assert "Crew physical inspection reports:" in prompt
     assert "oxygen physical=degraded reported_at_inspection=normal inspector=eng age=" in prompt
+
+
+def test_del_prompt_calls_out_visible_evidence_concerns() -> None:
+    ship = Ship.prototype()
+    technician = CrewMate("tec", CrewRole.SYSTEMS_TECHNICIAN, "life_support", (0, 0), (90, 200, 255), True)
+    engineer = CrewMate("eng", CrewRole.ENGINEERING_OFFICER, "engineering", (0, 0), (255, 190, 90))
+    ship.register_crew(technician)
+    ship.register_crew(engineer)
+    technician.assign_task("inspect", "logs")
+    ship.damage_system(SystemKind.OXYGEN, SystemState.DEGRADED, actor="tec")
+    del_ai = DEL(ship, backend=FakeBackend())
+
+    prompt = del_ai._build_prompt()
+
+    assert "Visible evidence concerns:" in prompt
+    assert "- tec:systems_technician room=life_support task=inspect logs (assigned) target_room=bridge" in prompt
+    assert "- tec room=life_support near oxygen reported=degraded while task=inspect logs" in prompt
+    assert "- log: oxygen fault alarm degraded in life_support" in prompt
+    assert "tec changed oxygen physical" not in prompt
+
+
+def test_del_prompt_calls_out_contradictory_technician_report() -> None:
+    ship = Ship.prototype()
+    technician = CrewMate(
+        "tec",
+        CrewRole.SYSTEMS_TECHNICIAN,
+        "life_support",
+        (0, 0),
+        (90, 200, 255),
+        True,
+    )
+    engineer = CrewMate("eng", CrewRole.ENGINEERING_OFFICER, "engineering", (0, 0), (255, 190, 90))
+    ship.register_crew(technician)
+    ship.register_crew(engineer)
+    ship.record_physical_report(SystemKind.OXYGEN, "tec")
+    ship.damage_system(SystemKind.OXYGEN, SystemState.DEGRADED, actor="tec")
+    del_ai = DEL(ship, backend=FakeBackend())
+
+    prompt = del_ai._build_prompt()
+
+    assert "- report: tec reported oxygen physical=normal but visible status is degraded" in prompt
+    assert "- tec area=life_support boundary_doors=door_life_support_aft_corridor, door_life_support_storage" in prompt
+
+
+def test_del_prompt_shows_latest_unique_memory_facts() -> None:
+    ship = Ship.prototype()
+    del_ai = DEL(ship, backend=FakeBackend())
+    del_ai.memory.extend(
+        [
+            "tec near oxygen during fault",
+            "doors normal",
+            "doors normal",
+            "cameras normal",
+        ]
+    )
+
+    prompt = del_ai._build_prompt()
+
+    assert prompt.count("- doors normal") == 1
+    assert "- tec near oxygen during fault" in prompt
 
 
 def test_del_prompt_includes_active_crew_tasks() -> None:
@@ -796,7 +1197,7 @@ def test_del_prompt_includes_active_crew_tasks() -> None:
 
     assert "- tec:systems_technician room=maintenance_corridor task=idle" in prompt
     assert "systems_technician player" not in prompt
-    assert "- eng:engineering_officer room=engineering task=inspect oxygen (assigned)" in prompt
+    assert "- eng:engineering_officer room=engineering task=inspect oxygen (assigned) target_room=life_support" in prompt
 
 
 def test_del_prompt_timestamps_recent_action_results() -> None:
@@ -808,8 +1209,25 @@ def test_del_prompt_timestamps_recent_action_results() -> None:
     prompt = del_ai._build_prompt()
 
     assert "Recent action results:" in prompt
-    assert '[T-02:05 (125s remaining)] ACTION {"tool":"reports","system":"oxygen"}' in prompt
-    assert "[T-02:05 (125s remaining)] REPORTS oxygen=none room=life_support" in prompt
+    assert '[T-02:05 (125s remaining)] ACTION: {"tool":"reports","system":"oxygen"}' in prompt
+    assert "[T-02:05 (125s remaining)] SYSTEM RESPONSE: REPORTS oxygen=none room=life_support" in prompt
+
+
+def test_del_prompt_includes_recent_crew_notifications() -> None:
+    ship = Ship.prototype()
+    engineer = CrewMate("eng", CrewRole.ENGINEERING_OFFICER, "engineering", (340, 990), (255, 190, 90))
+    ship.register_crew(engineer)
+    ship.lock_door("door_life_support_aft_corridor")
+    ship.lock_door("door_life_support_storage")
+
+    engineer.assign_task("inspect", "oxygen")
+    engineer.update_ai(0.1, ship)
+
+    del_ai = DEL(ship, backend=FakeBackend())
+    prompt = del_ai._build_prompt()
+
+    assert "Crew notifications:" in prompt
+    assert "CREW_NOTIFICATIONS eng:cannot route to oxygen from engineering; route blocked age=" in prompt
 
 
 def test_del_removes_qwen_thinking_block() -> None:
@@ -838,9 +1256,7 @@ def test_del_records_structured_validation_failures_in_terminal_history() -> Non
 
     assert result.startswith("ERR model produced invalid structured action plan")
     assert any(entry.endswith(result) for entry in del_ai.terminal_history)
-    assert any(
-        line.startswith("DEL raw model output attempt 1: I should look at oxygen first.") for line in transcript.lines
-    )
+    assert any(line.startswith("DEL model output attempt 1: I should look at oxygen first.") for line in transcript.lines)
 
 
 def test_del_start_runs_inference_loop_without_manual_trigger() -> None:
@@ -876,6 +1292,25 @@ def test_qwen_backend_requires_gpu_offload(monkeypatch, tmp_path) -> None:
 
     with pytest.raises(RuntimeError, match="requires llama-cpp-python with GPU offload support"):
         QwenLlamaCppBackend(tmp_path / "model.gguf")
+
+
+def test_qwen_backend_reports_gpu_memory_guidance_on_model_load_failure(monkeypatch, tmp_path) -> None:
+    class FailingLlama:
+        def __init__(self, *args, **kwargs) -> None:
+            raise ValueError("Failed to load model from file: /tmp/model.gguf")
+
+    fake_llama_cpp = ModuleType("llama_cpp")
+    fake_llama_cpp.Llama = FailingLlama
+    fake_llama_cpp.llama_cpp = SimpleNamespace(llama_supports_gpu_offload=lambda: True)
+    monkeypatch.setitem(sys.modules, "llama_cpp", fake_llama_cpp)
+
+    with pytest.raises(RuntimeError) as excinfo:
+        QwenLlamaCppBackend(tmp_path / "model.gguf")
+
+    message = str(excinfo.value)
+    assert "Likely cause: GPU VRAM is full" in message
+    assert "Close GPU-heavy apps and try again." in message
+    assert "CTRL_ALT_DEL_N_GPU_LAYERS=12 uv run play" in message
 
 
 def test_default_backend_downloads_missing_qwen_model(monkeypatch, tmp_path) -> None:

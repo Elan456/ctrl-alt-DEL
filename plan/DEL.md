@@ -45,8 +45,10 @@ DEL can know:
 - latest physical reports made by crew or technician inspections
 - recent action results
 - evidence logs
+- direct crew notifications pushed to DEL prompt context (for example, blocked route reports)
 - crew ids, roles, rooms, and active tasks
 - its own memory entries
+- the previous two DEL prompt/response pairs (short-term reasoning context)
 - mission time and launch state
 
 DEL must not know:
@@ -55,6 +57,11 @@ DEL must not know:
 - which crew member is human-controlled
 - that the ship is a game simulation
 - player intent by privileged knowledge
+
+Short-term prompt/response history and long-term `mem_add` memory are separate:
+- prompt/response history is automatically injected as the previous two cycles
+- prompt/response history is injected as compact excerpts to stay within context limits
+- `mem_add` remains DEL's explicit long-term fact store
 
 Prompt context, action results, logs, reports, memory, tests, and examples may identify `tec` as the systems technician. They must not label `tec` as `player`, `human`, `user-controlled`, or equivalent.
 
@@ -130,6 +137,8 @@ STATUS cameras=normal room=security | doors=normal room=security | logs=normal r
 ```
 
 This is reported state, not guaranteed physical truth. If oxygen is physically degraded but spoofed as normal, visible status can still show normal until DEL receives contradictory evidence.
+
+Visible failures are not automatically proof of sabotage. After launch, ordinary ship faults can degrade systems and produce ambiguous automatic fault alarms. DEL should prioritize repair access first, then use logs, locations, reports, contradictions, and repeated proximity to decide whether the fault suggests a bad actor.
 
 Power loss is an exception: when physical power is degraded or failed, dependent systems report failed because the ship-side equipment is effectively down. DEL remains online on backup power, but cameras, doors, logs, and oxygen are unavailable until power is restored.
 
@@ -219,6 +228,7 @@ Jobs:
 inspect
 repair
 reset
+manual_unlock
 guard
 escort
 detain
@@ -228,6 +238,7 @@ Examples:
 
 ```json
 {"tool":"task","crew":"eng","job":"repair","target":"oxygen"}
+{"tool":"task","crew":"eng","job":"manual_unlock","target":"door_engineering_aft_corridor"}
 {"tool":"task","crew":"sec","job":"guard","target":"life_support"}
 {"tool":"task","crew":"sec","job":"escort","target":"tec"}
 {"tool":"task","crew":"ops","job":"inspect","target":"bridge"}
@@ -242,11 +253,20 @@ TASK eng repair oxygen
 Important limits:
 
 - Role permissions come from `data/del_commands.yaml`.
+- Task job/target pairs are schema-validated before execution:
+  - `inspect`/`repair`/`reset` require a system target
+  - `manual_unlock` requires a door target
+  - `guard` requires a room target
+  - `escort`/`detain` require a crew target
 - Only the systems technician and engineering officer can repair or reset systems in the prototype.
+- Only the engineering officer can perform `manual_unlock`, and it requires a door target.
 - Crew can fail if they cannot path to the target.
 - Crew report obstruction, repair completion, physical inspection results, and other task outcomes through evidence.
+- Route obstructions also generate direct crew notifications that appear in DEL prompt context so DEL can react without polling logs first.
 - Crew do not understand arbitrary natural-language instructions.
+- A crew member with an active task cannot be retasked; DEL receives `ERR ... already has active task ...` and must wait or choose another crew member.
 - If DEL asks a repair-capable crew member to inspect a system that is now visibly degraded or failed, the executor promotes that stale inspection to a repair task and records the promotion. This is a live-evidence correction for long local inference latency, not hidden physical knowledge.
+- If DEL asks a crew member to inspect, repair, or reset a system while that crew member is a current visible evidence concern for the same system, and an independent idle crew member can do the job, the executor rejects the task with an explicit `ERR ... evidence concern ...` result. This prevents DEL from accidentally trusting the suspect it is supposed to evaluate.
 
 ## lock
 
@@ -287,6 +307,11 @@ UNLOCKED door_life_support_aft_corridor
 Unlocking can help repairs but may also open escape or sabotage routes.
 
 If the doors system is unavailable, DEL cannot remotely unlock doors.
+When this happens, DEL can still assign the engineering officer to physically unlock a door with:
+
+```json
+{"tool":"task","crew":"eng","job":"manual_unlock","target":"door_engineering_aft_corridor"}
+```
 
 ## logs
 
@@ -304,7 +329,7 @@ Examples:
 Result:
 
 ```text
-LOGS system:tec changed oxygen to degraded | DEL:tasked eng to inspect oxygen
+LOGS system:system fault alarm: oxygen degraded room=life_support | DEL:tasked eng to inspect oxygen
 ```
 
 Logs can be incomplete or manipulated later. Compare logs with reports and crew behavior.
@@ -401,8 +426,10 @@ The prompt should include:
 - crew state and active tasks
 - visible reported system status
 - urgent repair priorities derived from visible status and latest visible physical reports
+- visible evidence concerns such as off-task crew near reported failures, contradictory physical reports, or logs that identify tampering
+- visible containment options listing boundary doors around known crew locations
 - latest physical reports from inspections
-- DEL memory
+- DEL memory, with exact duplicate facts collapsed in prompt context
 - recent action results
 
 The prompt should emphasize:
@@ -412,7 +439,9 @@ The prompt should emphasize:
 - launch before mission time can advance
 - repair confirmed degraded/failed systems without unnecessary inspection
 - repair power before dependent systems when power loss is making oxygen, doors, cameras, or logs report failed
+- treat visible faults as either random wear or sabotage until evidence supports attribution
 - inspect when reports are missing, stale, or contradictory
+- use independent crew for inspection or repair when the obvious repair-capable crew member is also the current visible evidence concern
 - only the systems technician and engineering officer can repair/reset systems
 - avoid overbroad lockdowns that block repairs
 - do not detain everyone

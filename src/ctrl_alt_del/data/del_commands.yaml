@@ -34,7 +34,7 @@ commands:
 
 task_jobs:
   inspect:
-    target_types: [system, door, room]
+    target_types: [system]
   guard:
     target_types: [door, room]
   escort:
@@ -47,9 +47,11 @@ task_jobs:
   reset:
     target_types: [system]
     allowed_evidence_states: [degraded, failed, under repair]
+  manual_unlock:
+    target_types: [door]
 
 role_task_jobs:
   systems_technician: [inspect, repair, reset]
-  engineering_officer: [inspect, repair, reset]
+  engineering_officer: [inspect, repair, reset, manual_unlock]
   operations_officer: [inspect]
   security_officer: [inspect, guard, escort, detain]

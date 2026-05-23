@@ -3,6 +3,7 @@ from __future__ import annotations
 from collections import deque
 from dataclasses import dataclass, field
 from importlib.resources import files
+import random
 from pathlib import Path
 from time import monotonic
 from typing import Any
@@ -17,6 +18,8 @@ POWER_DEPENDENT_SYSTEMS = frozenset(
     {SystemKind.OXYGEN, SystemKind.DOORS, SystemKind.CAMERAS, SystemKind.LOGS}
 )
 OXYGEN_FATAL_EXPOSURE_SECONDS = 60.0
+RANDOM_FAULT_INTERVAL_SECONDS = 30.0
+RANDOM_FAULT_CHANCE = 0.35
 
 
 @dataclass(frozen=True)
@@ -76,6 +79,14 @@ class PhysicalSystemReport:
     room: str
 
 
+@dataclass(frozen=True)
+class CrewNotification:
+    timestamp: float
+    crew_id: str
+    message: str
+    target: str | None = None
+
+
 @dataclass
 class Ship:
     """Owns authored rooms, prototype systems, evidence logs, and crew registry."""
@@ -88,10 +99,17 @@ class Ship:
     crew: dict[str, object] = field(default_factory=dict)
     evidence: list[EvidenceEvent] = field(default_factory=list)
     physical_reports: dict[SystemKind, PhysicalSystemReport] = field(default_factory=dict)
+    crew_notifications: list[CrewNotification] = field(default_factory=list)
     locked_doors: set[str] = field(default_factory=set)
+    navigation_revision: int = 0
     arrival_seconds_remaining: float = 300.0
     launched: bool = False
     oxygen_down_seconds: float = 0.0
+    random_faults_enabled: bool = True
+    random_fault_interval_seconds: float = RANDOM_FAULT_INTERVAL_SECONDS
+    random_fault_chance: float = RANDOM_FAULT_CHANCE
+    random_fault_seconds_until_check: float = RANDOM_FAULT_INTERVAL_SECONDS
+    random_fault_rng: random.Random = field(default_factory=random.Random, repr=False)
 
     @classmethod
     def prototype(cls) -> Ship:
@@ -111,6 +129,7 @@ class Ship:
         return ship
 
     def tick(self, dt: float) -> None:
+        self._update_random_faults(dt)
         self._update_oxygen_exposure(dt)
         if self.launched:
             self.arrival_seconds_remaining = max(0.0, self.arrival_seconds_remaining - dt)
@@ -141,8 +160,35 @@ class Ship:
         state: SystemState = SystemState.DEGRADED,
         actor: str = "unknown",
     ) -> None:
-        self.systems[system].damage(state)
-        self.record("system", f"{actor} changed {system.value} to {state.value}", system.value)
+        ship_system = self.systems[system]
+        report_was_overridden = ship_system.report_overridden
+        ship_system.damage(state)
+        if not report_was_overridden:
+            self.record(
+                "system",
+                f"system fault alarm: {system.value} {state.value} room={ship_system.room}",
+                system.value,
+            )
+
+    def trigger_random_fault(
+        self,
+        system: SystemKind | None = None,
+        state: SystemState = SystemState.DEGRADED,
+    ) -> SystemKind | None:
+        candidates = self._random_fault_candidates()
+        if system is None:
+            if not candidates:
+                return None
+            system = self.random_fault_rng.choice(candidates)
+        elif system not in candidates:
+            return None
+
+        ship_system = self.systems[system]
+        report_was_overridden = ship_system.report_overridden
+        ship_system.damage(state)
+        if not report_was_overridden:
+            self.record("system", f"automatic fault alarm: {system.value} {state.value}", system.value)
+        return system
 
     def spoof_system(
         self,
@@ -208,13 +254,19 @@ class Ship:
     def lock_door(self, door_id: str, actor: str = "DEL") -> None:
         if door_id not in self.doors:
             raise KeyError(f"unknown door {door_id}")
+        was_unlocked = door_id not in self.locked_doors
         self.locked_doors.add(door_id)
+        if was_unlocked:
+            self.navigation_revision += 1
         self.record("door", f"{actor} locked {door_id}", door_id)
 
     def unlock_door(self, door_id: str, actor: str = "DEL") -> None:
         if door_id not in self.doors:
             raise KeyError(f"unknown door {door_id}")
+        was_locked = door_id in self.locked_doors
         self.locked_doors.discard(door_id)
+        if was_locked:
+            self.navigation_revision += 1
         self.record("door", f"{actor} unlocked {door_id}", door_id)
 
     def effective_physical_state(self, system: SystemKind) -> SystemState:
@@ -401,8 +453,43 @@ class Ship:
     def record(self, source: str, message: str, target: str | None = None) -> None:
         self.evidence.append(EvidenceEvent(monotonic(), source, message, target))
 
+    def notify_del_from_crew(self, crew_id: str, message: str, target: str | None = None) -> None:
+        notification = CrewNotification(
+            timestamp=monotonic(),
+            crew_id=crew_id,
+            message=message,
+            target=target,
+        )
+        self.crew_notifications.append(notification)
+        if len(self.crew_notifications) > 40:
+            self.crew_notifications = self.crew_notifications[-40:]
+
+    def recent_crew_notifications(self, limit: int = 6) -> list[CrewNotification]:
+        if limit <= 0:
+            return []
+        return self.crew_notifications[-limit:]
+
     def _is_corridor_end_locked(self, corridor: Corridor, room_id: str) -> bool:
         return any(door.at == room_id and door.door_id in self.locked_doors for door in corridor.doors)
+
+    def _update_random_faults(self, dt: float) -> None:
+        if not self.launched or not self.random_faults_enabled:
+            return
+
+        interval = max(0.001, self.random_fault_interval_seconds)
+        self.random_fault_seconds_until_check -= dt
+        while self.random_fault_seconds_until_check <= 0:
+            self.random_fault_seconds_until_check += interval
+            if self.random_fault_rng.random() <= self.random_fault_chance:
+                self.trigger_random_fault()
+
+    def _random_fault_candidates(self) -> list[SystemKind]:
+        return [
+            system
+            for system, ship_system in self.systems.items()
+            if ship_system.physical_state == SystemState.NORMAL
+            and self.effective_physical_state(system) == SystemState.NORMAL
+        ]
 
     def _update_oxygen_exposure(self, dt: float) -> None:
         if self.effective_physical_state(SystemKind.OXYGEN) == SystemState.NORMAL:
